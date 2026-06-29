@@ -1,0 +1,182 @@
+# Copyright 2024 GenesisAI Contributors
+# Licensed under the Apache License, Version 2.0
+
+[build-system]
+requires = ["setuptools>=69.0.0", "wheel>=0.42.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "genesisai"
+description = "GenesisAI: a terminal-first, production-grade Artificial Intelligence Operating System."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "GenesisAI Contributors" }]
+maintainers = [{ name = "GenesisAI Contributors" }]
+requires-python = ">=3.10"
+dynamic = ["version"]
+keywords = [
+    "ai",
+    "artificial-intelligence",
+    "operating-system",
+    "cli",
+    "agent",
+    "llm",
+    "terminal",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: System :: Shells",
+]
+
+# NOTE: tool-specific lint/type/test configuration intentionally lives in
+# the dedicated ruff.toml, mypy.ini, pytest.ini, and tox.ini files defined
+# elsewhere in the project tree, NOT in this file, to avoid two competing
+# sources of truth for the same settings.
+
+dependencies = [
+    "typer>=0.12.0",
+    "rich>=13.7.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.2.0",
+    "httpx>=0.27.0",
+    "structlog>=24.1.0",
+    "tenacity>=8.3.0",
+    "PyYAML>=6.0.1",
+    "tomli>=2.0.1; python_version < '3.11'",
+    "tomli-w>=1.0.0",
+    "python-dotenv>=1.0.1",
+    "platformdirs>=4.2.0",
+    "cryptography>=42.0.0",
+    "orjson>=3.10.0",
+    "tiktoken>=0.7.0",
+    "numpy>=1.26.0",
+    "sqlalchemy>=2.0.30",
+    "aiosqlite>=0.20.0",
+    "prompt-toolkit>=3.0.43",
+    "watchdog>=4.0.0",
+    "psutil>=5.9.8",
+    "jsonschema>=4.22.0",
+    "packaging>=24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.5.0",
+    "mypy>=1.10.0",
+    "black>=24.4.0",
+    "pre-commit>=3.7.0",
+    "ipython>=8.24.0",
+]
+test = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.7",
+    "pytest-cov>=5.0.0",
+    "pytest-mock>=3.14.0",
+    "hypothesis>=6.103.0",
+    "respx>=0.21.1",
+]
+docs = [
+    "mkdocs>=1.6.0",
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=0.25.0",
+]
+providers-openai = ["openai>=1.30.0"]
+providers-anthropic = ["anthropic>=0.28.0"]
+providers-gemini = ["google-generativeai>=0.6.0"]
+providers-mistral = ["mistralai>=0.4.0"]
+providers-cohere = ["cohere>=5.5.0"]
+providers-groq = ["groq>=0.9.0"]
+providers-huggingface = ["huggingface-hub>=0.23.0"]
+providers-bedrock = ["boto3>=1.34.0"]
+providers-vertex = ["google-cloud-aiplatform>=1.55.0"]
+providers-ollama = ["ollama>=0.2.0"]
+all-providers = [
+    "openai>=1.30.0",
+    "anthropic>=0.28.0",
+    "google-generativeai>=0.6.0",
+    "mistralai>=0.4.0",
+    "cohere>=5.5.0",
+    "groq>=0.9.0",
+    "huggingface-hub>=0.23.0",
+    "boto3>=1.34.0",
+    "google-cloud-aiplatform>=1.55.0",
+    "ollama>=0.2.0",
+]
+all = [
+    "ruff>=0.5.0",
+    "mypy>=1.10.0",
+    "black>=24.4.0",
+    "pre-commit>=3.7.0",
+    "ipython>=8.24.0",
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.7",
+    "pytest-cov>=5.0.0",
+    "pytest-mock>=3.14.0",
+    "hypothesis>=6.103.0",
+    "respx>=0.21.1",
+    "mkdocs>=1.6.0",
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=0.25.0",
+    "openai>=1.30.0",
+    "anthropic>=0.28.0",
+    "google-generativeai>=0.6.0",
+    "mistralai>=0.4.0",
+    "cohere>=5.5.0",
+    "groq>=0.9.0",
+    "huggingface-hub>=0.23.0",
+    "boto3>=1.34.0",
+    "google-cloud-aiplatform>=1.55.0",
+    "ollama>=0.2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/genesisai-project/genesisai"
+Repository = "https://github.com/genesisai-project/genesisai"
+Issues = "https://github.com/genesisai-project/genesisai/issues"
+Changelog = "https://github.com/genesisai-project/genesisai/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/genesisai-project/genesisai/blob/main/README.md"
+
+[project.scripts]
+genesisai = "cli.cli:main"
+
+[tool.setuptools]
+# GenesisAI intentionally ships as a flat collection of top-level
+# first-party packages (app, core, engine, runtime, brain, cognition,
+# memory, llm, reasoning, cli, execution, ai_security,
+# benchmarking_suite, updater_server, crash_reporting, and others) as
+# defined by the canonical project tree, rather than a nested
+# `src/genesisai/` package. Several of these top-level names (e.g.
+# `core`, `app`, `engine`) are generic, so GenesisAI MUST always be
+# installed into an isolated virtual environment to avoid import
+# collisions with unrelated third-party packages of the same name.
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = [
+    "tests*",
+    "docs*",
+    "resources*",
+    "examples*",
+    "scripts*",
+    "build*",
+    "dist*",
+    "*.egg-info",
+]
+
+[tool.setuptools.package-data]
+"*" = ["py.typed"]
+
+[tool.setuptools.dynamic]
+version = { attr = "core.version.__version__" }
