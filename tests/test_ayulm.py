@@ -1,4 +1,7 @@
 import importlib.util
+import contextlib
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,6 +38,12 @@ class AyuLMTrainingTests(unittest.TestCase):
             self.assertTrue(registry.is_file())
             resumed=ayulm.train(corpus,checkpoint,steps=1,config=config,seed=7,resume=checkpoint,registry=registry)
             self.assertEqual(resumed["step"],2)
+            from ayu.cli import main
+            report=io.StringIO()
+            with contextlib.redirect_stdout(report):
+                self.assertEqual(main(["benchmark",str(checkpoint),"--tokens","1","--repeats","1"]),0)
+            benchmark=json.loads(report.getvalue())
+            self.assertGreater(benchmark["mean_tokens_per_second"],0)
             other=root/"changed.txt"; other.write_text("different training content "*80,encoding="utf-8")
             with self.assertRaisesRegex(ValueError,"corpus contents differ"):
                 ayulm.train(other,checkpoint,steps=1,config=config,seed=7,resume=checkpoint,registry=registry)

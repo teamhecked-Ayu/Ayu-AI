@@ -1,4 +1,4 @@
-"""Configuration loaded from environment variables and an optional local .env."""
+"""Local-first runtime settings from environment variables and optional .env."""
 from __future__ import annotations
 
 import os
@@ -25,6 +25,13 @@ def _load_dotenv(path: Path) -> None:
         return
 
 
+def _env_bool(name: str, default: str) -> bool:
+    raw = os.getenv(name, default).strip().lower()
+    if raw not in {"true", "false", "1", "0", "yes", "no"}:
+        raise ValueError(f"{name} must be true or false")
+    return raw in {"true", "1", "yes"}
+
+
 @dataclass(frozen=True)
 class Settings:
     api_key: str | None
@@ -38,6 +45,9 @@ class Settings:
     llama_cli: str = "llama-cli"
     local_timeout: float = 300.0
     memory_enabled: bool = True
+    remote_provider: str = "openai-compatible"
+    newsapi_api_key: str | None = None
+    newsapi_enabled: bool = False
 
     @classmethod
     def load(cls, env_file: Path | None = None) -> "Settings":
@@ -54,19 +64,38 @@ class Settings:
             raise ValueError("AYU_MAX_OUTPUT_TOKENS must be between 1 and 8192")
         mode = os.getenv("AYU_MODE", "local").strip().lower()
         if mode not in {"basic", "local", "remote"}:
-            raise ValueError("AYU_MODE must be basic, local, or remote; AyuLM research uses separate `ayu train`/`ayu generate` commands")
-        raw_memory = os.getenv("AYU_MEMORY_ENABLED", "true").strip().lower()
-        if raw_memory not in {"true","false","1","0","yes","no"}:
-            raise ValueError("AYU_MEMORY_ENABLED must be true or false")
-        raw_model = os.getenv("AYU_LOCAL_MODEL", "").strip()
-        model_path = Path(raw_model).expanduser() if raw_model else None
+            raise ValueError("AYU_MODE must be basic, local, or remote; AyuLM research uses separate training/generation commands")
+        remote_provider = os.getenv("AYU_PROVIDER", "openai-compatible").strip().lower()
+        if remote_provider not in {"openai-compatible", "openai", "anthropic"}:
+            raise ValueError("AYU_PROVIDER must be openai-compatible, openai, or anthropic")
+        memory_enabled = _env_bool("AYU_MEMORY_ENABLED", "true")
+        newsapi_enabled = _env_bool("AYU_NEWSAPI_ENABLED", "false")
+        raw_model = os.getenv("AYU_MODEL", "").strip()
+        if not raw_model:
+            model_env = {"openai": "OPENAI_MODEL", "anthropic": "ANTHROPIC_MODEL"}.get(remote_provider)
+            raw_model = os.getenv(model_env, "").strip() if model_env else ""
+        if remote_provider == "openai":
+            api_key = os.getenv("OPENAI_API_KEY")
+        elif remote_provider == "anthropic":
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+        else:
+            api_key = os.getenv("AYU_API_KEY")
+        raw_local_model = os.getenv("AYU_LOCAL_MODEL", "").strip()
+        model_path = Path(raw_local_model).expanduser() if raw_local_model else None
         db_path = Path(os.getenv("AYU_DATABASE", str(Path.home() / ".ayu-ai" / "ayu.sqlite3"))).expanduser()
         return cls(
-            api_key=os.getenv("AYU_API_KEY"), base_url=base_url,
-            model=os.getenv("AYU_MODEL"), database_path=db_path,
-            request_timeout=timeout, max_output_tokens=max_tokens,
-            mode=mode, local_model_path=model_path,
+            api_key=api_key,
+            base_url=base_url,
+            model=raw_model or None,
+            database_path=db_path,
+            request_timeout=timeout,
+            max_output_tokens=max_tokens,
+            mode=mode,
+            local_model_path=model_path,
             llama_cli=os.getenv("AYU_LLAMA_CLI", "llama-cli"),
             local_timeout=local_timeout,
-            memory_enabled=raw_memory in {"true","1","yes"},
+            memory_enabled=memory_enabled,
+            remote_provider=remote_provider,
+            newsapi_api_key=os.getenv("NEWSAPI_API_KEY"),
+            newsapi_enabled=newsapi_enabled,
         )

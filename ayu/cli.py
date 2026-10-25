@@ -4,7 +4,7 @@ import argparse, contextlib, json, os, re, shutil, sqlite3, sys, tempfile, uuid
 from pathlib import Path
 from . import __version__
 from .settings import Settings
-from .provider import ChatProvider, LlamaCppProvider, ProviderError, remote_endpoint_error
+from .provider import LlamaCppProvider, NewsAPIClient, ProviderError, build_remote_provider, remote_endpoint_error
 from .store import MEMORY_CATEGORIES, Store
 
 SYSTEM = ("You are Ayu AI, a careful assistant. Be candid about uncertainty. Do not claim to have executed code, "
@@ -68,9 +68,15 @@ def build_parser() -> argparse.ArgumentParser:
     tasks = sub.add_parser("tasks", help="Manage local project task records")
     ts = tasks.add_subparsers(dest="tasks_command", required=True)
     ta = ts.add_parser("add", help="Add a task to a project")
-    ta.add_argument("project"); ta.add_argument("title")
+    ta.add_argument("project"); ta.add_argument("title"); ta.add_argument("--depends-on", nargs="+", type=int, default=[], help="Existing prerequisite task ID(s) in the same project")
     tl = ts.add_parser("list", help="List project tasks")
     tl.add_argument("project")
+    ti = ts.add_parser("inspect", help="Inspect a task and its dependency readiness")
+    ti.add_argument("id", type=int)
+    td = ts.add_parser("set-dependencies", help="Replace dependencies on a pending task; cycles and cross-project edges are rejected")
+    td.add_argument("id", type=int); td.add_argument("--depends-on", nargs="*", type=int, default=[])
+    for task_action, help_text in (("start", "Mark a ready task in progress"), ("complete", "Complete a task only after its prerequisites are complete")):
+        action_parser=ts.add_parser(task_action,help=help_text); action_parser.add_argument("id",type=int)
     tc = ts.add_parser("cancel", help="Cancel a pending task")
     tc.add_argument("id", type=int)
     config = sub.add_parser("config", help="Inspect and validate local configuration")
@@ -79,6 +85,30 @@ def build_parser() -> argparse.ArgumentParser:
     cs.add_parser("validate", help="Validate configuration without contacting providers")
     tools = sub.add_parser("tools", help="Show implemented tool capabilities")
     tools.add_subparsers(dest="tools_command", required=True).add_parser("list", help="List available local tools")
+    agents = sub.add_parser("agents", help="Run bounded model-mediated agent workflows and inspect their audit records")
+    ag = agents.add_subparsers(dest="agents_command", required=True)
+    ag.add_parser("roles", help="List the fixed sequential agent roles")
+    agent_run = ag.add_parser("run", help="Plan and analyze a workspace task using read-only tools")
+    agent_run.add_argument("task", nargs="+", help="Task description; not executed as a shell command")
+    agent_run.add_argument("--workspace", type=Path, required=True, help="Explicit existing root directory that read-only tools may access")
+    agent_run.add_argument("--project", help="Optional saved project ID/name; workspace must be inside its configured root")
+    agent_run.add_argument("--mode", choices=("local", "remote"), help="Selected inference mode (default AYU_MODE; no fallback)")
+    agent_run.add_argument("--max-steps", type=int, default=3, help="Maximum model-proposed read-only tools (1..4)")
+    agent_run.add_argument("--allow-remote-context", action="store_true", help="Explicitly allow selected local excerpts to be sent to the configured remote provider")
+    agent_inspect = ag.add_parser("inspect", help="Inspect a persisted agent run and its local audit events")
+    agent_inspect.add_argument("run_id")
+    news = sub.add_parser("news", help="Optional NewsAPI.org metadata search; no AI provider is called")
+    news_sub = news.add_subparsers(dest="news_command", required=True)
+    news_search = news_sub.add_parser("search", help="Search article metadata with NewsAPI.org")
+    news_search.add_argument("query", nargs="+", help="Search terms")
+    news_search.add_argument("--from-date")
+    news_search.add_argument("--to-date")
+    news_search.add_argument("--sources", help="Comma-separated NewsAPI source IDs")
+    news_search.add_argument("--sort-by", choices=("relevancy", "popularity", "publishedAt"), default="publishedAt")
+    news_search.add_argument("--limit", type=int, default=10)
+    news_search.add_argument("--allow-network", action="store_true", required=True, help="Explicitly authorize this external network request")
+    self_test = sub.add_parser("test", help="Run bounded offline checks without touching user data")
+    self_test.add_argument("--ayulm-smoke", action="store_true", help="Also perform one tiny CPU AyuLM training/checkpoint/generation test; requires optional PyTorch")
     backup=sub.add_parser("backup",help="Create a private local SQLite backup")
     backup.add_argument("output",type=Path)
     restore=sub.add_parser("restore",help="Restore the local database (destructive; explicit --confirm required)")
@@ -97,6 +127,8 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("checkpoint", type=Path); evaluate.add_argument("--data", required=True, type=Path); evaluate.add_argument("--device", default="cpu")
     generate = sub.add_parser("generate", help="Generate text with an AyuLM-native checkpoint (not a pretrained assistant)")
     generate.add_argument("checkpoint", type=Path); generate.add_argument("prompt"); generate.add_argument("--tokens", type=int, default=80); generate.add_argument("--device", default="cpu")
+    benchmark = sub.add_parser("benchmark", help="Measure AyuLM autoregressive generation speed on this machine (not a quality score)")
+    benchmark.add_argument("checkpoint", type=Path); benchmark.add_argument("--tokens", type=int, default=32); benchmark.add_argument("--repeats", type=int, default=3); benchmark.add_argument("--device", default="cpu")
     checkpoint = sub.add_parser("checkpoint", help="Inspect and validate an AyuLM checkpoint")
     checkpoint.add_subparsers(dest="checkpoint_command", required=True).add_parser("inspect", help="Read checkpoint metadata and verify weight/config compatibility").add_argument("path", type=Path)
     return parser
@@ -122,7 +154,7 @@ def run_chat(store: Store, settings: Settings, args: argparse.Namespace) -> int:
     if mode == "basic":
         print("Basic mode provides local CLI, memory, project, task, and document-search features; it does not perform LLM inference. Use --mode local with a verified model, or explicitly --mode remote with provider credentials.", file=sys.stderr)
         return 2
-    provider = LlamaCppProvider(settings) if mode == "local" else ChatProvider(settings)
+    provider = LlamaCppProvider(settings) if mode == "local" else build_remote_provider(settings)
     session_id = args.session or uuid.uuid4().hex[:12]
     print(f"Ayu AI session: {session_id} (mode: {mode}; role: {args.role})")
     if mode == "local":
@@ -167,7 +199,10 @@ def _project(store: Store, command: str, args: argparse.Namespace) -> int:
     tasks = store.list_tasks(p["id"])
     if command == "inspect":
         print(f"Project: {p['name']} ({p['id']})\nRoot: {p['root_path'] or '(none)'}\nUpdated: {p['updated_at']}\nSaved state: {json.dumps(state,ensure_ascii=False)}")
-        for t in tasks: print(f"Task #{t['id']} [{t['status']}] {t['title']}")
+        for t in tasks:
+            dependencies=store.task_dependencies(t["id"])
+            suffix=f" (depends on {', '.join('#'+str(x) for x in dependencies)})" if dependencies else ""
+            print(f"Task #{t['id']} [{t['status']}] {t['title']}{suffix}")
         return 0
     if command == "update":
         try: value=json.loads(args.value)
@@ -188,8 +223,13 @@ def _project(store: Store, command: str, args: argparse.Namespace) -> int:
             if not candidate.is_absolute() and p["root_path"]: candidate=Path(p["root_path"])/candidate
             exists=candidate.exists(); artifacts_ok=artifacts_ok and exists
             print(f"Artifact {ref}: {'exists' if exists else 'missing'}")
+    ready = store.ready_tasks(p["id"])
     pending = [t for t in tasks if t["status"] in {"pending","in_progress"}]
-    print(f"Next pending task: #{pending[0]['id']} {pending[0]['title']}" if pending else "Next pending task: none")
+    print(f"Next ready task: #{ready[0]['id']} {ready[0]['title']}" if ready else "Next ready task: none")
+    blocked=[t for t in pending if t["id"] not in {r["id"] for r in ready}]
+    for task in blocked:
+        deps=store.task_dependencies(task["id"])
+        print(f"Blocked task #{task['id']} prerequisites: "+", ".join(f"#{dep}" for dep in deps if (store.get_task(dep) or {}).get("status")!="completed"))
     if root_ok is False or not artifacts_ok: return 1
     return 0
 
@@ -221,6 +261,24 @@ def run_ayulm(args: argparse.Namespace) -> int:
             if len(prefix)>model.config.seq_len: prefix=prefix[-model.config.seq_len:]
             output=model.generate(torch.tensor([prefix],dtype=torch.long,device=args.device),max_new_tokens=args.tokens)
             print(tokenizer.decode(output[0].tolist()[len(prefix):])); return 0
+        if args.command == "benchmark":
+            import platform, statistics, time, torch
+            if not 1 <= args.tokens <= 2048: raise ValueError("--tokens must be between 1 and 2048")
+            if not 1 <= args.repeats <= 10: raise ValueError("--repeats must be between 1 and 10")
+            model,meta=ayulm.load_checkpoint(args.checkpoint,args.device)
+            prefix=ayulm.ByteTokenizer().encode("Ayu benchmark",add_bos=True)[-model.config.seq_len:]
+            initial=torch.tensor([prefix],dtype=torch.long,device=args.device)
+            torch.manual_seed(0)
+            model.generate(initial,max_new_tokens=min(2,args.tokens))
+            def synchronize():
+                if str(args.device).startswith("cuda"): torch.cuda.synchronize(args.device)
+            measurements=[]
+            for _ in range(args.repeats):
+                synchronize(); started=time.perf_counter()
+                model.generate(initial.clone(),max_new_tokens=args.tokens)
+                synchronize(); measurements.append(time.perf_counter()-started)
+            total=sum(measurements)
+            print(json.dumps({"checkpoint":str(args.checkpoint.resolve()),"parameters":ayulm.parameter_count(model),"device":str(args.device),"torch_version":torch.__version__,"python":platform.python_version(),"prompt_tokens":len(prefix),"generated_tokens_per_repeat":args.tokens,"repeats":args.repeats,"seconds_per_repeat":measurements,"median_seconds":statistics.median(measurements),"mean_tokens_per_second":args.tokens*args.repeats/total,"note":"Local autoregressive throughput only; not a quality score or cross-machine comparison."},indent=2)); return 0
         if args.command == "evaluate":
             import mmap, torch
             model,meta=ayulm.load_checkpoint(args.checkpoint,args.device)
@@ -240,18 +298,70 @@ def run_ayulm(args: argparse.Namespace) -> int:
         print(f"AyuLM error: {exc}",file=sys.stderr); return 1
 
 
+def run_agent(store: Store, settings: Settings, args: argparse.Namespace) -> int:
+    from .agents import AgentRunError, AgentRunner
+    from .tools import ToolError, ToolRegistry
+    if args.agents_command == "roles":
+        print("Sequential roles: planner -> bounded read-only researcher/tools -> analyst -> reviewer. Each model call uses the explicitly selected provider; there is no parallel or recursive loop.")
+        return 0
+    if args.agents_command == "inspect":
+        run = store.get_agent_run(args.run_id)
+        if run is None:
+            print("Agent run not found.", file=sys.stderr)
+            return 1
+        events = store.list_agent_events(args.run_id)
+        run["events"] = []
+        for event in events:
+            payload = json.loads(event.pop("payload_json"))
+            run["events"].append({**event, "payload": payload})
+        print(json.dumps(run, ensure_ascii=False, indent=2))
+        return 0
+    mode = args.mode or settings.mode
+    if mode not in {"local", "remote"}:
+        print("Agent execution requires explicit local or remote inference; basic mode does not invent model reasoning.", file=sys.stderr)
+        return 2
+    if mode == "remote" and not args.allow_remote_context:
+        print("Remote agent mode may send the task and retrieved workspace excerpts to the provider. Re-run with --allow-remote-context only if you explicitly consent.", file=sys.stderr)
+        return 2
+    try:
+        workspace = args.workspace.expanduser().resolve(strict=True)
+        if not workspace.is_dir(): raise ToolError("--workspace must be an existing directory.")
+        project_id = None
+        if args.project:
+            project = store.get_project(args.project)
+            if project is None: raise ToolError(f"Saved project not found: {args.project}")
+            if not project["root_path"]: raise ToolError("Selected project has no saved root; configure one before associating an agent run.")
+            project_root = Path(project["root_path"]).expanduser().resolve(strict=True)
+            if not project_root.is_dir() or not workspace.is_relative_to(project_root):
+                raise ToolError("Approved workspace must be inside the selected project's existing root.")
+            project_id = project["id"]
+        if not 1 <= args.max_steps <= 4: raise ToolError("--max-steps must be between 1 and 4.")
+        tools = ToolRegistry(workspace)
+        provider = LlamaCppProvider(settings) if mode == "local" else build_remote_provider(settings)
+        runner = AgentRunner(provider, store, tools, mode=mode)
+        result = runner.run(" ".join(args.task), max_steps=args.max_steps, project_id=project_id)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    except (AgentRunError, ToolError, OSError, ValueError) as exc:
+        print(f"Agent run failed: {exc}", file=sys.stderr)
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help(); return 0
-    if args.command in {"train","train-resume","evaluate","generate","checkpoint"}:
+    if args.command == "test":
+        from .selftest import run_smoke_test
+        return run_smoke_test(include_ayulm=args.ayulm_smoke)
+    if args.command in {"train","train-resume","evaluate","generate","benchmark","checkpoint"}:
         return run_ayulm(args)
     if args.command == "init":
         target = Path.cwd() / ".env"
         if target.exists() and not args.force: print(f"Configuration already exists at {target}; not overwriting. Use --force to replace it."); return 1
         try:
-            target.write_text("# Ayu AI local configuration. No API key is required for basic/local mode.\nAYU_MODE=local\n# AYU_LOCAL_MODEL=/absolute/path/to/model.gguf\n# AYU_LLAMA_CLI=llama-cli\n# AYU_DATABASE=~/.ayu-ai/ayu.sqlite3\n# Remote mode is opt-in: set AYU_MODE=remote, AYU_API_KEY, AYU_MODEL, and AYU_BASE_URL.\n",encoding="utf-8")
+            target.write_text("# Ayu AI local configuration. No API key is required for basic/local mode.\nAYU_MODE=local\nAYU_MEMORY_ENABLED=true\n# AYU_LOCAL_MODEL=/absolute/path/to/model.gguf\n# AYU_LLAMA_CLI=llama-cli\n# AYU_DATABASE=~/.ayu-ai/ayu.sqlite3\n# Select one optional remote inference provider explicitly:\n# AYU_MODE=remote\n# AYU_PROVIDER=openai\n# OPENAI_API_KEY=placeholder-only\n# AYU_MODEL=your-openai-model-id\n# AYU_PROVIDER=anthropic\n# ANTHROPIC_API_KEY=placeholder-only\n# ANTHROPIC_MODEL=your-anthropic-model-id\n# For OpenAI-compatible services use AYU_PROVIDER=openai-compatible, AYU_API_KEY, AYU_BASE_URL, AYU_MODEL.\n# Optional NewsAPI requires NEWSAPI_API_KEY and AYU_NEWSAPI_ENABLED=true; searches require --allow-network.\n",encoding="utf-8")
             try: target.chmod(0o600)
             except OSError: pass
         except OSError as exc:
@@ -266,16 +376,17 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "doctor":
         parent = settings.database_path.parent
         remote_selected=settings.mode=="remote"
-        remote_ready=bool(settings.api_key and settings.model) and remote_endpoint_error(settings.base_url) is None
+        endpoint_ok = settings.remote_provider == "anthropic" or remote_endpoint_error(settings.base_url) is None
+        remote_ready=bool(settings.api_key and settings.model) and endpoint_ok
         checks = [("Python",sys.version_info >= (3,10),sys.version.split()[0]),("Database directory",parent.exists() and parent.is_dir(),str(parent)),("Local model",not settings.local_model_path or settings.local_model_path.is_file(),str(settings.local_model_path or "not configured")),("llama.cpp",bool(shutil.which(settings.llama_cli)) or Path(settings.llama_cli).is_file(),settings.llama_cli),("Remote configuration",remote_ready if remote_selected else True,"ready" if remote_ready else "incomplete/unsafe; optional unless AYU_MODE=remote")]
         for label,ok,detail in checks: print(f"{'OK' if ok else 'INFO' if label in {'llama.cpp','Remote credentials'} else 'NEEDS ATTENTION'}  {label}: {detail}")
         return 0 if all(ok or label=="llama.cpp" for label,ok,_ in checks) else 1
     if cmd == "status":
-        messages,memories=store.counts(); print(f"Ayu AI {__version__}\nMode: {settings.mode}\nDatabase: {settings.database_path}\nPersistent memory enabled: {settings.memory_enabled}\nConfigured local model: {settings.local_model_path or 'none'}\nRemote model configured: {'yes' if settings.model else 'no'}\nAPI key: {'present (value hidden)' if settings.api_key else 'not configured'}\nMessages: {messages}\nMemories: {memories}\nNo telemetry is sent."); return 0
+        messages,memories=store.counts(); print(f"Ayu AI {__version__}\nMode: {settings.mode}\nDatabase: {settings.database_path}\nPersistent memory enabled: {settings.memory_enabled}\nConfigured local model: {settings.local_model_path or 'none'}\nRemote provider: {settings.remote_provider}\nRemote model configured: {'yes' if settings.model else 'no'}\nSelected AI credential: {'present (value hidden)' if settings.api_key else 'not configured'}\nNewsAPI enabled: {settings.newsapi_enabled}\nNewsAPI credential: {'present (value hidden)' if settings.newsapi_api_key else 'not configured'}\nMessages: {messages}\nMemories: {memories}\nNo telemetry is sent."); return 0
     if cmd == "chat": return run_chat(store,settings,args)
     if cmd == "models":
         if args.models_command == "list":
-            print(f"Local GGUF: {settings.local_model_path or '(not configured)'}\nRemote: {'configured (opt-in only)' if settings.model and settings.api_key else '(not configured)'}")
+            print(f"Local GGUF: {settings.local_model_path or '(not configured)'}\nRemote provider: {settings.remote_provider}\nRemote: {'configured (opt-in only)' if settings.model and settings.api_key else '(not configured)'}")
             registry=Path.home()/".ayu-ai"/"model-registry.json"
             try: entries=json.loads(registry.read_text(encoding="utf-8")) if registry.is_file() else []
             except (OSError,json.JSONDecodeError): entries=[]
@@ -291,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.models_command == "info":
             p=settings.local_model_path
-            print(f"Local backend: llama.cpp CLI\nRuntime: {settings.llama_cli}\nLocal model: {p or 'not configured'}\nModel present: {bool(p and p.is_file())}\nRemote mode configured: {bool(settings.api_key and settings.model)}\nRemote calls are never used in local mode."); return 0
+            print(f"Local backend: llama.cpp CLI\nRuntime: {settings.llama_cli}\nLocal model: {p or 'not configured'}\nModel present: {bool(p and p.is_file())}\nRemote provider: {settings.remote_provider}\nRemote mode configured: {bool(settings.api_key and settings.model)}\nRemote calls are never used in local mode."); return 0
         try:
             p,exe=LlamaCppProvider(settings).validate()
             print(f"Verified local GGUF: {p}\nSize: {p.stat().st_size:,} bytes\nRuntime: {exe}\nNo license is inferred; review the model source's license separately."); return 0
@@ -354,30 +465,65 @@ def main(argv: list[str] | None = None) -> int:
         if args.tasks_command=="add":
             p=store.get_project(args.project)
             if not p: print("Project not found.",file=sys.stderr); return 1
-            try: tid=store.add_task(p["id"],args.title)
+            try: tid=store.add_task(p["id"],args.title,args.depends_on)
             except Exception as exc: print(f"Could not add task: {exc}",file=sys.stderr); return 2
             print(f"Added task #{tid}."); return 0
         if args.tasks_command=="list":
             p=store.get_project(args.project)
             if not p: print("Project not found.",file=sys.stderr); return 1
             rows=store.list_tasks(p["id"])
-            for t in rows: print(f"#{t['id']} [{t['status']}] {t['title']}")
+            for t in rows:
+                dependencies=store.task_dependencies(t["id"])
+                suffix=f" (depends on {', '.join('#'+str(x) for x in dependencies)})" if dependencies else ""
+                print(f"#{t['id']} [{t['status']}] {t['title']}{suffix}")
             if not rows: print("No tasks.")
             return 0
-        ok=store.update_task_status(args.id,"cancelled"); print("Task cancelled." if ok else "Task not found."); return 0 if ok else 1
+        if args.tasks_command=="inspect":
+            task=store.get_task(args.id)
+            if task is None: print("Task not found.",file=sys.stderr); return 1
+            dependencies=store.task_dependencies(args.id)
+            unmet=[dep for dep in dependencies if (store.get_task(dep) or {}).get("status")!="completed"]
+            print(json.dumps({"task":task,"depends_on":dependencies,"ready":not unmet and task["status"] in {"pending","in_progress"},"unmet_dependencies":unmet},indent=2))
+            return 0
+        if args.tasks_command=="set-dependencies":
+            try: store.set_task_dependencies(args.id,args.depends_on)
+            except ValueError as exc: print(f"Could not update task dependencies: {exc}",file=sys.stderr); return 2
+            print(f"Dependencies updated for task #{args.id}."); return 0
+        status={"start":"in_progress","complete":"completed","cancel":"cancelled"}[args.tasks_command]
+        try: ok=store.update_task_status(args.id,status)
+        except ValueError as exc: print(f"Task status change rejected: {exc}",file=sys.stderr); return 2
+        label={"start":"Task started","complete":"Task completed","cancel":"Task cancelled"}[args.tasks_command]
+        print(label+"." if ok else "Task not found."); return 0 if ok else 1
     if cmd == "config":
         if args.config_command=="show":
-            print(f"AYU_MODE={settings.mode}\nAYU_MEMORY_ENABLED={str(settings.memory_enabled).lower()}\nAYU_DATABASE={settings.database_path}\nAYU_LOCAL_MODEL={settings.local_model_path or ''}\nAYU_LLAMA_CLI={settings.llama_cli}\nAYU_BASE_URL={settings.base_url}\nAYU_MODEL={settings.model or ''}\nAYU_API_KEY={'<redacted: set>' if settings.api_key else '<not set>'}"); return 0
+            print(f"AYU_MODE={settings.mode}\nAYU_MEMORY_ENABLED={str(settings.memory_enabled).lower()}\nAYU_DATABASE={settings.database_path}\nAYU_LOCAL_MODEL={settings.local_model_path or ''}\nAYU_LLAMA_CLI={settings.llama_cli}\nAYU_PROVIDER={settings.remote_provider}\nAYU_BASE_URL={settings.base_url}\nAYU_MODEL={settings.model or ''}\nSelected AI credential={'<redacted: set>' if settings.api_key else '<not set>'}\nNEWSAPI_API_KEY={'<redacted: set>' if settings.newsapi_api_key else '<not set>'}\nAYU_NEWSAPI_ENABLED={str(settings.newsapi_enabled).lower()}"); return 0
         if settings.mode=="remote":
             problems=[]
-            if not settings.api_key: problems.append("AYU_API_KEY is missing")
-            if not settings.model: problems.append("AYU_MODEL is missing")
-            endpoint_error=remote_endpoint_error(settings.base_url)
+            key_name={"openai":"OPENAI_API_KEY","anthropic":"ANTHROPIC_API_KEY"}.get(settings.remote_provider,"AYU_API_KEY")
+            model_name={"openai":"AYU_MODEL or OPENAI_MODEL","anthropic":"AYU_MODEL or ANTHROPIC_MODEL"}.get(settings.remote_provider,"AYU_MODEL")
+            if not settings.api_key: problems.append(f"{key_name} is missing")
+            if not settings.model: problems.append(f"{model_name} is missing")
+            endpoint_error=None if settings.remote_provider=="anthropic" else remote_endpoint_error(settings.base_url)
             if endpoint_error: problems.append(endpoint_error)
             if problems: print("Remote configuration invalid: "+"; ".join(problems),file=sys.stderr); return 1
         print("Configuration parses successfully. Remote settings are not used in the selected mode; this check sends no network requests."); return 0
     if cmd == "tools":
-        print("Implemented local tools:\n- SQLite conversation and memory storage\n- project/task bookkeeping\n- lexical search of explicitly supplied local text documents\nNot implemented: shell execution, file modification, browser access, autonomous code execution, external research."); return 0
+        from .tools import ToolRegistry
+        with tempfile.TemporaryDirectory(prefix="ayu-tool-list-") as temporary:
+            metadata = ToolRegistry(Path(temporary)).list_tools()
+        print(json.dumps({"tools":metadata,"policy":"Read-only; explicit workspace required; no shell, file modification, or network tools."},indent=2))
+        return 0
+    if cmd == "agents": return run_agent(store, settings, args)
+    if cmd == "news":
+        if settings.mode == "basic":
+            print("Online research is disabled in basic/offline mode.", file=sys.stderr); return 2
+        if not args.allow_network:
+            print("NewsAPI makes an external request; re-run this command with --allow-network to authorize it.",file=sys.stderr); return 2
+        try:
+            result=NewsAPIClient(settings).search(" ".join(args.query),from_date=args.from_date,to_date=args.to_date,sources=args.sources,sort_by=args.sort_by,page_size=args.limit)
+            print(json.dumps(result,ensure_ascii=False,indent=2)); return 0
+        except ProviderError as exc:
+            print(f"NewsAPI search failed: {exc}",file=sys.stderr); return 1
     if cmd == "backup":
         target=args.output.expanduser().resolve()
         if target.exists(): print(f"Backup destination already exists: {target}",file=sys.stderr); return 2

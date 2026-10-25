@@ -66,6 +66,26 @@ class Store:
                     title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending'
                     CHECK(status IN ('pending','in_progress','completed','cancelled','failed')),
                     notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS task_dependencies (
+                    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    depends_on_task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    PRIMARY KEY(task_id,depends_on_task_id),
+                    CHECK(task_id != depends_on_task_id));
+                CREATE INDEX IF NOT EXISTS idx_task_dependencies_target ON task_dependencies(depends_on_task_id);
+                CREATE TABLE IF NOT EXISTS agent_runs (
+                    id TEXT PRIMARY KEY, task TEXT NOT NULL,
+                    project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+                    mode TEXT NOT NULL CHECK(mode IN ('local','remote')),
+                    status TEXT NOT NULL CHECK(status IN ('running','completed','failed','cancelled')),
+                    max_steps INTEGER NOT NULL CHECK(max_steps BETWEEN 1 AND 4),
+                    error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS idx_agent_runs_created ON agent_runs(created_at DESC);
+                CREATE TABLE IF NOT EXISTS agent_events (
+                    id INTEGER PRIMARY KEY, run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+                    sequence INTEGER NOT NULL CHECK(sequence >= 0), actor TEXT NOT NULL,
+                    event_type TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                    UNIQUE(run_id,sequence));
+                CREATE INDEX IF NOT EXISTS idx_agent_events_run ON agent_events(run_id,sequence);
             """)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(memories)")}
             if "category" not in columns:
@@ -186,20 +206,125 @@ class Store:
                     db.execute("INSERT INTO memories(content,created_at,category,project_id,provenance) VALUES(?,?,?,?, 'imported')",(content,created_at,category,project_id))
         return len(prepared)
 
-    def add_task(self, project_id: str, title: str) -> int:
+    def add_task(self, project_id: str, title: str, depends_on: list[int] | None = None) -> int:
+        if not isinstance(title,str): raise ValueError("task title must be a string")
         title=title.strip()
         if not title: raise ValueError("task title cannot be empty")
+        dependencies=self._normalize_dependencies([] if depends_on is None else depends_on)
         with self.connect() as db:
+            if not db.execute("SELECT 1 FROM projects WHERE id=?",(project_id,)).fetchone(): raise ValueError(f"project not found: {project_id}")
+            self._validate_dependency_targets(db,project_id,dependencies)
             cur = db.execute("INSERT INTO tasks(project_id,title,created_at,updated_at) VALUES(?,?,?,?)", (project_id,title,utc_now(),utc_now()))
-            return int(cur.lastrowid)
+            task_id=int(cur.lastrowid)
+            db.executemany("INSERT INTO task_dependencies(task_id,depends_on_task_id) VALUES(?,?)",[(task_id,dep) for dep in dependencies])
+            return task_id
+
+    @staticmethod
+    def _normalize_dependencies(dependencies: list[int]) -> list[int]:
+        if not isinstance(dependencies,list) or len(dependencies)>128: raise ValueError("dependencies must be a list of at most 128 task IDs")
+        if any(isinstance(item,bool) or not isinstance(item,int) or item<=0 for item in dependencies): raise ValueError("dependency IDs must be positive integers")
+        if len(set(dependencies))!=len(dependencies): raise ValueError("dependency IDs must not be repeated")
+        return dependencies
+
+    @staticmethod
+    def _validate_dependency_targets(db: sqlite3.Connection, project_id: str, dependencies: list[int]) -> None:
+        if not dependencies: return
+        placeholders=",".join("?" for _ in dependencies)
+        rows=db.execute(f"SELECT id,project_id FROM tasks WHERE id IN ({placeholders})",dependencies).fetchall()
+        if len(rows)!=len(dependencies): raise ValueError("one or more dependency tasks do not exist")
+        if any(row["project_id"]!=project_id for row in rows): raise ValueError("task dependencies must belong to the same project")
+
+    def set_task_dependencies(self, task_id: int, dependencies: list[int]) -> None:
+        dependencies=self._normalize_dependencies(dependencies)
+        if isinstance(task_id,bool) or not isinstance(task_id,int) or task_id<=0: raise ValueError("task ID must be a positive integer")
+        with self.connect() as db:
+            task=db.execute("SELECT project_id,status FROM tasks WHERE id=?",(task_id,)).fetchone()
+            if not task: raise ValueError(f"task not found: {task_id}")
+            if task["status"] in {"in_progress","completed"}: raise ValueError("dependencies cannot be changed after a task starts")
+            self._validate_dependency_targets(db,task["project_id"],dependencies)
+            graph: dict[int,list[int]]={}
+            for row in db.execute("SELECT task_id,depends_on_task_id FROM task_dependencies"):
+                graph.setdefault(int(row["task_id"]),[]).append(int(row["depends_on_task_id"]))
+            graph[task_id]=dependencies
+            pending=list(dependencies); visited=set()
+            while pending:
+                current=pending.pop()
+                if current==task_id: raise ValueError("task dependency would create a cycle")
+                if current in visited: continue
+                visited.add(current); pending.extend(graph.get(current,[]))
+            db.execute("DELETE FROM task_dependencies WHERE task_id=?",(task_id,))
+            db.executemany("INSERT INTO task_dependencies(task_id,depends_on_task_id) VALUES(?,?)",[(task_id,dep) for dep in dependencies])
 
     def list_tasks(self, project_id: str) -> list[sqlite3.Row]:
         with self.connect() as db: return db.execute("SELECT * FROM tasks WHERE project_id=? ORDER BY id", (project_id,)).fetchall()
 
+    def get_task(self, task_id: int):
+        with self.connect() as db:
+            row=db.execute("SELECT * FROM tasks WHERE id=?",(task_id,)).fetchone()
+        return dict(row) if row else None
+
+    def task_dependencies(self, task_id: int) -> list[int]:
+        with self.connect() as db:
+            rows=db.execute("SELECT depends_on_task_id FROM task_dependencies WHERE task_id=? ORDER BY depends_on_task_id",(task_id,)).fetchall()
+        return [int(row[0]) for row in rows]
+
+    def ready_tasks(self, project_id: str) -> list[sqlite3.Row]:
+        ready=[]
+        with self.connect() as db:
+            rows=db.execute("SELECT t.* FROM tasks t WHERE t.project_id=? AND t.status IN ('pending','in_progress') AND NOT EXISTS (SELECT 1 FROM task_dependencies d JOIN tasks p ON p.id=d.depends_on_task_id WHERE d.task_id=t.id AND p.status!='completed') ORDER BY t.id",(project_id,)).fetchall()
+        return rows
+
     def update_task_status(self, task_id: int, status: str) -> bool:
-        if status not in {"pending","in_progress","completed","cancelled","failed"}: raise ValueError("invalid task status")
-        with self.connect() as db: return db.execute("UPDATE tasks SET status=?,updated_at=? WHERE id=?", (status,utc_now(),task_id)).rowcount > 0
+        if not isinstance(status,str) or status not in {"pending","in_progress","completed","cancelled","failed"}: raise ValueError("invalid task status")
+        if isinstance(task_id,bool) or not isinstance(task_id,int) or task_id<=0: raise ValueError("task ID must be a positive integer")
+        with self.connect() as db:
+            task=db.execute("SELECT id,status FROM tasks WHERE id=?",(task_id,)).fetchone()
+            if not task: return False
+            if status in {"in_progress","completed"}:
+                blocked=db.execute("SELECT p.id FROM task_dependencies d JOIN tasks p ON p.id=d.depends_on_task_id WHERE d.task_id=? AND p.status!='completed' ORDER BY p.id",(task_id,)).fetchall()
+                if blocked: raise ValueError("task is blocked by incomplete prerequisites: "+", ".join(str(row["id"]) for row in blocked))
+            if task["status"]=="completed" and status!="completed":
+                raise ValueError("completed tasks cannot be reopened; create a new task to preserve dependency history")
+            return db.execute("UPDATE tasks SET status=?,updated_at=? WHERE id=?", (status,utc_now(),task_id)).rowcount > 0
 
     def counts(self) -> tuple[int,int]:
         with self.connect() as db:
             return (int(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0]), int(db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]))
+
+    def create_agent_run(self, run_id: str, task: str, mode: str, max_steps: int, project_id: str | None = None) -> None:
+        if not isinstance(run_id,str) or not run_id or len(run_id) > 64: raise ValueError("invalid agent run ID")
+        if not isinstance(task,str): raise ValueError("agent task must be text")
+        task = task.strip()
+        if not task or len(task) > 2000: raise ValueError("agent task must be 1..2000 characters")
+        if mode not in {"local", "remote"}: raise ValueError("agent mode must be local or remote")
+        if isinstance(max_steps, bool) or not isinstance(max_steps, int) or not 1 <= max_steps <= 4:
+            raise ValueError("agent max_steps must be 1..4")
+        now = utc_now()
+        with self.connect() as db:
+            db.execute("INSERT INTO agent_runs(id,task,project_id,mode,status,max_steps,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (run_id,task,project_id,mode,"running",max_steps,now,now))
+
+    def record_agent_event(self, run_id: str, sequence: int, actor: str, event_type: str, payload: dict) -> None:
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0: raise ValueError("event sequence must be a non-negative integer")
+        if not isinstance(actor,str) or not actor or len(actor) > 48 or not isinstance(event_type,str) or not event_type or len(event_type) > 48: raise ValueError("invalid agent event actor/type")
+        if not isinstance(payload,dict): raise ValueError("agent event payload must be a JSON object")
+        serialized=json.dumps(payload,ensure_ascii=False,separators=(",",":"))
+        if len(serialized.encode("utf-8")) > 64 * 1024: raise ValueError("agent event exceeds the 64 KiB audit limit")
+        with self.connect() as db:
+            db.execute("INSERT INTO agent_events(run_id,sequence,actor,event_type,payload_json,created_at) VALUES(?,?,?,?,?,?)", (run_id,sequence,actor,event_type,serialized,utc_now()))
+            db.execute("UPDATE agent_runs SET updated_at=? WHERE id=? AND status='running'",(utc_now(),run_id))
+
+    def finish_agent_run(self, run_id: str, status: str, error: str = "") -> bool:
+        if status not in {"completed","failed","cancelled"}: raise ValueError("invalid terminal agent run status")
+        if not isinstance(error,str): raise ValueError("agent run error must be text")
+        with self.connect() as db:
+            return db.execute("UPDATE agent_runs SET status=?,error=?,updated_at=? WHERE id=? AND status='running'",(status,error[:1000],utc_now(),run_id)).rowcount == 1
+
+    def get_agent_run(self, run_id: str):
+        with self.connect() as db:
+            row=db.execute("SELECT * FROM agent_runs WHERE id=?",(run_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_agent_events(self, run_id: str) -> list[dict]:
+        with self.connect() as db:
+            rows=db.execute("SELECT sequence,actor,event_type,payload_json,created_at FROM agent_events WHERE run_id=? ORDER BY sequence",(run_id,)).fetchall()
+        return [dict(row) for row in rows]

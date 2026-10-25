@@ -1,0 +1,51 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core-tests:
+    name: Core tests (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install core and test dependencies
+        run: |
+          python -m pip install -e .
+          python -m pip install -e ".[dev]"
+      - name: Compile source
+        run: python -m compileall -q ayu tests
+      - name: Run offline test suite
+        run: python -m pytest -q
+
+  ayulm-cpu:
+    name: CPU AyuLM train/checkpoint/generation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package and tests
+        run: python -m pip install -e ".[dev]"
+      - name: Install optional CPU-only PyTorch
+        run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Run bounded CPU model smoke test
+        run: ayu test --ayulm-smoke
+      - name: Run complete suite with model tests enabled
+        run: python -m pytest -q

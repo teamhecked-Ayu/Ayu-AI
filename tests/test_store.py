@@ -41,6 +41,31 @@ class StoreTests(unittest.TestCase):
         self.store.remember("pref")
         self.assertEqual(self.store.counts(), (1, 1))
 
+    def test_task_dependencies_gate_readiness_and_completion(self):
+        project=self.store.create_project("dependency-project")
+        first=self.store.add_task(project,"collect evidence")
+        second=self.store.add_task(project,"write report",[first])
+        self.assertEqual(self.store.task_dependencies(second),[first])
+        self.assertEqual([row["id"] for row in self.store.ready_tasks(project)],[first])
+        with self.assertRaisesRegex(ValueError,"blocked by incomplete"):
+            self.store.update_task_status(second,"completed")
+        self.assertTrue(self.store.update_task_status(first,"completed"))
+        self.assertEqual([row["id"] for row in self.store.ready_tasks(project)],[second])
+        self.assertTrue(self.store.update_task_status(second,"in_progress"))
+        self.assertTrue(self.store.update_task_status(second,"completed"))
+
+    def test_task_dependency_graph_rejects_cycles_and_cross_project_edges(self):
+        project=self.store.create_project("graph-one")
+        other=self.store.create_project("graph-two")
+        first=self.store.add_task(project,"first")
+        second=self.store.add_task(project,"second",[first])
+        unrelated=self.store.add_task(other,"unrelated")
+        with self.assertRaisesRegex(ValueError,"cycle"):
+            self.store.set_task_dependencies(first,[second])
+        self.assertEqual(self.store.task_dependencies(first),[])
+        with self.assertRaisesRegex(ValueError,"same project"):
+            self.store.add_task(project,"bad dependency",[unrelated])
+
     def test_additive_migration_preserves_legacy_memory_rows(self):
         legacy=Path(self.temp.name)/"legacy.sqlite3"
         with sqlite3.connect(legacy) as db:

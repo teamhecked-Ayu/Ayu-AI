@@ -1,95 +1,186 @@
 # Ayu AI / AyuLM
 
-Ayu AI is a terminal-first, local-first **foundation**. It is intentionally useful without a paid API key and does not silently fall back to a remote model. This repository is not a pretrained conversational model, a production autonomous operating system, or a competitor to leading AI labs. Its native AyuLM model is a small, educational byte-level decoder Transformer that can be trained from scratch with user-supplied text and optional PyTorch.
+Ayu AI is a terminal-first, local-first software foundation. It is useful without API credentials and never silently falls back to a remote model. AyuLM is a small byte-level decoder Transformer for educational/research training—not a pretrained assistant or a claim of frontier-level capability. The software does not claim autonomous production-OS guarantees.
 
-## Operating modes
+## Operating modes and optional services
 
-- **Basic:** CLI, local SQLite memory, project/task bookkeeping, configuration checks, and lexical text-document search. No language-model reasoning is simulated.
-- **Local:** explicit local inference through an installed `llama.cpp` `llama-cli` executable and a user-provided compatible GGUF model. The application does not download models or contact remote providers in this mode.
-- **Remote (optional):** OpenAI-compatible API adapter, used only when explicitly requested with `ayu chat --mode remote` or `AYU_MODE=remote`. Chat content is sent to the configured provider.
-- **AyuLM research:** native model training, checkpointing, evaluation, and generation; optional PyTorch dependency. A newly trained tiny model is not a pretrained assistant.
+- **Basic:** local CLI, SQLite conversation/memory/project/task records, configuration checks, and bounded lexical text search. It does not pretend to provide LLM reasoning.
+- **Local inference:** an explicitly selected, already-installed `llama.cpp` `llama-cli` and a user-supplied compatible GGUF. Ayu does not download weights or contact an AI provider in local mode.
+- **Remote inference:** explicitly selected OpenAI, Anthropic, or OpenAI-compatible adapter. Remote calls require credentials/model configuration and an explicit remote chat/agent command (or `AYU_MODE=remote`); there is no fallback between providers.
+- **NewsAPI:** optional article-metadata search, independent from AI inference. It is disabled unless `AYU_NEWSAPI_ENABLED=true`, a NewsAPI key is configured, and the command includes `--allow-network`. Results are untrusted external metadata and are not automatically sent to an AI provider.
+- **AyuLM research:** native byte-level training, held-out validation, checkpoint/resume, evaluation, generation, and local throughput benchmark. PyTorch is optional. A model trained from scratch on a tiny corpus is not a conversational assistant.
 
 ## Install
 
-Requires Python 3.10+. From a checkout, create an isolated environment:
+Requires Python 3.10 or later. The basic package has no NumPy/PyTorch requirement (Python 3.10 uses the small `tomli` TOML backport); training, legacy prototype, and developer dependencies are optional extras.
 
 ### Linux / macOS
 
 ```sh
+git clone https://github.com/teamhecked-Ayu/Ayu-AI.git
+cd Ayu-AI
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e .
+python -m pip install -e '.[dev]'
 ayu --help
 ```
 
 ### Windows PowerShell
 
 ```powershell
+git clone https://github.com/teamhecked-Ayu/Ayu-AI.git
+Set-Location Ayu-AI
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -e .
+python -m pip install -e ".[dev]"
 ayu --help
 ```
 
-### Android Termux
+### Android Termux (documented profile; not manually tested)
 
-Install Python using Termux's package manager (`pkg install python`), then use the Linux steps. Python CPU-only basic commands are the intended baseline. PyTorch wheels and llama.cpp builds may not be available or practical on every Android/ARM device; do not assume GPU acceleration, adequate RAM, or that a model will fit. No model weights are bundled.
+The intended baseline is the Python/SQLite CLI; native inference/training availability depends on device architecture, RAM, Android/Termux packages, and compatible upstream binaries/wheels. These commands have **not** been verified on an Android device:
 
-For native AyuLM training only, install the optional extra where a compatible PyTorch wheel exists:
+```sh
+pkg update
+pkg install python git
+git clone https://github.com/teamhecked-Ayu/Ayu-AI.git
+cd Ayu-AI
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+ayu doctor
+ayu test
+```
+
+If Termux's Python packaging policy or a wheel/native dependency prevents installation, do not bypass that policy blindly; retain the basic CLI profile or use the appropriate Termux package. GGUF files can be large; check available storage/RAM and the model license first. No Docker, GPU, or model download is required for basic commands.
+
+### Optional CPU AyuLM training dependency
+
+Install only if you want native AyuLM training/evaluation/generation and a compatible PyTorch wheel is available:
 
 ```sh
 python -m pip install -e '.[training]'
+ayu test --ayulm-smoke
 ```
 
-## First-run basics
+The smoke test uses a generated synthetic corpus and temporary checkpoint; it does not touch your documents or leave model artifacts behind. CUDA is optional and not required for CPU use.
+
+The retained legacy NumPy prototype is separate from the native byte-level AyuLM model; install it only when importing the old compatibility classes with `python -m pip install -e '.[prototype]'`.
+
+## First run and local configuration
 
 ```sh
-ayu                         # help; no API key required
-ayu init                    # create a private local .env template; never overwrites by default
-ayu doctor                  # local checks, no network request
-ayu status                  # redacts the API key value
+ayu --help
+ayu --version
+ayu init                    # create .env; does not overwrite an existing file by default
+ayu doctor                  # local checks; sends no network request
+ayu status                  # reports providers/credential presence, never secret values
+ayu test                    # offline SQLite, memory, project/task and HTTPS-policy checks
 ayu memory status
 ayu project create my-app --root /path/to/existing/project
 ayu tasks add my-app "Review open issues"
 ayu project resume my-app
 ```
 
-Configuration variables can be set in the environment or a simple `.env` in the current working directory. Process environment values override `.env`. The `.env` parser does not support shell expansion or multiline values.
+Configuration can be set in the process environment or a simple `.env` in the current working directory; process values override `.env`. The parser does not support shell expansion or multiline values. The tracked [`.env.example`](.env.example) contains placeholders only and is not loaded automatically. Copy values you need to a private `.env`, replace placeholders, and never commit it.
 
 ```dotenv
 AYU_MODE=local
 AYU_MEMORY_ENABLED=true
 AYU_LOCAL_MODEL=/absolute/path/to/a-compatible-model.gguf
 AYU_LLAMA_CLI=llama-cli
-# Optional remote adapter only:
-# AYU_MODE=remote
-# AYU_API_KEY=your-provider-key
-# AYU_BASE_URL=https://api.openai.com/v1
-# AYU_MODEL=provider-supported-model-id
 # AYU_DATABASE=~/.ayu-ai/ayu.sqlite3
 # AYU_LOCAL_TIMEOUT=300
 ```
 
-Set `AYU_MEMORY_ENABLED=false` to disable saved-memory retrieval in chat and reject memory writes. Existing records remain on disk until explicitly deleted; this does not disable conversation-history persistence. Configuration examples are in [`examples/ayu.env.example`](examples/ayu.env.example).
+Set `AYU_MEMORY_ENABLED=false` to disable persistent-memory retrieval/writes in chat. Existing memories remain on disk, and conversation history is still persisted. Do not save credentials or other secrets as memories; saved user context may be sent to the explicitly selected inference provider.
 
-Keep `.env` private and never commit credentials. `ayu init` sets `.env` permissions to owner-only where the platform supports it. Remote calls require HTTPS; plaintext HTTP and URL-embedded credentials are rejected. Do not save secrets in memory: stored memory may be included in model context. SQLite database files and exports are created with owner-only POSIX permissions where supported; Windows ACL behavior depends on the user's directory policy.
+## Local GGUF inference
 
-## Local model setup
-
-Install `llama.cpp` yourself using its official platform instructions, obtain a GGUF model from a source you trust, and review the model's license and hardware requirements. Ayu will not choose or download a model for you. Set `AYU_LOCAL_MODEL` and, if needed, `AYU_LLAMA_CLI` to the executable path.
+Install/build `llama-cli` from the upstream llama.cpp project using instructions suitable for your operating system, obtain a compatible GGUF from a source you trust, and review its license and hardware requirements. Ayu does not choose/download weights. Configure paths explicitly:
 
 ```sh
-ayu models info
+export AYU_MODE=local
+export AYU_LOCAL_MODEL="$HOME/models/model.gguf"
+export AYU_LLAMA_CLI="$(command -v llama-cli)"
 ayu models verify
 ayu chat --mode local
 ayu chat --mode local --role coder --once "Explain this error: ..."
 ```
 
-`models verify` checks that the configured file exists, has a `.gguf` suffix, and a llama.cpp executable can be found. This is a preflight check; it does not prove that every GGUF architecture/quantization is supported or that the model fits available RAM. Inference attempts report runtime errors instead of falling back remotely.
+PowerShell equivalent:
 
-## Memory and project continuity
+```powershell
+$env:AYU_MODE = "local"
+$env:AYU_LOCAL_MODEL = "$HOME\models\model.gguf"
+$env:AYU_LLAMA_CLI = "llama-cli"
+ayu models verify
+ayu chat --mode local
+```
+
+`models verify` checks a nonempty/readable GGUF path and runtime executable; it cannot guarantee that a particular architecture/quantization is supported or that the model fits RAM. Local runs have a configured wall-time limit and cap captured stdout/stderr at 4 MiB per stream; runtime diagnostics are suppressed because they may echo prompt content. The configured binary still runs with your OS user's privileges—it is not sandboxed. No real GGUF/llama.cpp inference was available for verification in the development sandbox. Runtime failure never triggers remote fallback.
+
+## Optional OpenAI, Anthropic, and NewsAPI
+
+Choose **one** remote inference provider. The adapters use separate credential environment variables; keys are never shared between providers. Remote HTTP is rejected, error bodies are suppressed, and normal tests use mocks rather than paid/live calls.
+
+OpenAI:
+
+```sh
+export AYU_MODE=remote
+export AYU_PROVIDER=openai
+export OPENAI_API_KEY="<your-key>"
+export AYU_MODEL="<provider-supported-model-id>"
+ayu config validate
+ayu chat --mode remote --once "Hello"
+```
+
+Anthropic:
+
+```sh
+export AYU_MODE=remote
+export AYU_PROVIDER=anthropic
+export ANTHROPIC_API_KEY="<your-key>"
+export ANTHROPIC_MODEL="<provider-supported-model-id>"
+ayu config validate
+ayu chat --mode remote --once "Hello"
+```
+
+For another OpenAI-compatible API, choose `AYU_PROVIDER=openai-compatible` (the default), set `AYU_API_KEY`, `AYU_BASE_URL=https://<provider-host>/v1`, and `AYU_MODEL`. Use HTTPS and the model/endpoint format documented by that provider.
+
+NewsAPI is separate and does not provide LLM answers. Set `NEWSAPI_API_KEY` and `AYU_NEWSAPI_ENABLED=true`, then make each external request explicit:
+
+```sh
+export AYU_NEWSAPI_ENABLED=true
+export NEWSAPI_API_KEY="<your-newsapi-key>"
+ayu news search "climate policy" --from-date 2026-01-01 --sort-by relevancy --limit 5 --allow-network
+```
+
+The NewsAPI key is sent only to the fixed NewsAPI HTTPS endpoint in its API-key header. Article descriptions/URLs remain untrusted; verify them at the cited source. Respect the service's terms and rate limits. No live API call was made during development.
+
+## Bounded read-only agent workflow
+
+```sh
+ayu tools list
+ayu agents roles
+ayu agents run "Find where the config timeout is validated" --workspace . --mode local --max-steps 3
+ayu agents inspect RUN_ID
+```
+
+The workflow makes a bounded, sequential planner call, at most four allow-listed local tool calls, then analyst and reviewer calls. Current tools are literal text search and bounded UTF-8 source-file reading, confined to an explicitly supplied workspace; traversal, symlinks, hidden paths, secret/database extensions, unsupported file types, excess files/bytes, and invalid schemas are rejected. Search caps directories/files/bytes/matches and has a deadline; read caps each file at 512 KiB and each response at 150 lines. Registry time budgets reject late results but are not OS-level hard interrupts, so Ayu is not a filesystem sandbox. There is no shell, network, write, patch, arbitrary code/test execution, recursive loop, or tool-based privilege escalation. Run records/events are stored locally in the private SQLite database. The model reviewer is another model call, not independent proof.
+
+Local mode requires a working local GGUF configuration. Remote mode sends the task and retrieved file excerpts to the selected remote provider, so it refuses to run unless you explicitly pass `--allow-remote-context`:
+
+```sh
+ayu agents run "Summarize the config timeout implementation" --workspace . --mode remote --allow-remote-context
+```
+
+Use that flag only when you consent to sending the selected excerpts. The agent does not modify files or run tests; review its report yourself. End-to-end agent behavior has been verified with deterministic provider mocks, not a real remote model or an available GGUF model.
+
+## Memory, projects, and recovery
 
 ```sh
 ayu memory add --category preference "Prefer concise answers"
@@ -99,21 +190,21 @@ ayu memory update 1 --text "Prefer concise technical answers"
 ayu memory delete 1
 ayu project create notes --root ./notes
 ayu tasks add notes "Check backup"
+ayu tasks add notes "Write backup report" --depends-on 1
+ayu tasks start 1
+ayu tasks complete 1
+ayu tasks inspect 2
+ayu tasks set-dependencies 2 --depends-on 1
 ayu project inspect notes
 ayu project resume notes
 ayu project update notes --field goals --value '["Ship a tested CLI"]'
-```
-
-Memory categories are `working`, `episodic`, `semantic`, `project`, and `preference`. Records are local SQLite rows, tagged with timestamps and provenance. Duplicate content in the same category/project is updated rather than duplicated. Retrieval is simple lexical overlap; no hosted embeddings are used. Export/import uses validated JSON; `AYU_MEMORY_ENABLED=false` disables retrieval and new writes but does not delete old records or stop chat-history persistence.
-
-```sh
 ayu memory export ./memories.json
 ayu memory import ./memories.json
 ayu backup ./ayu-backup.sqlite3
 ayu restore ./ayu-backup.sqlite3 --confirm
 ```
 
-Restore is destructive and requires `--confirm`; it validates a staged copy, makes a private automatic pre-restore recovery copy, then replaces the active database. Close other Ayu processes before restoring. Project resume checks saved references and lists the next pending task; it does not autonomously continue work or claim an unverified task succeeded.
+Memory categories are `working`, `episodic`, `semantic`, `project`, and `preference`. SQLite records have timestamps/provenance; retrieval is lexical, not vector search. Task prerequisites are limited to existing tasks in the same project; updates reject cycles, and `in_progress`/`completed` transitions are blocked until every prerequisite is complete. Completed tasks cannot be reopened; create a new task to preserve history. Project resume selects a ready task and reports blocked prerequisites; it does not autonomously claim completion. Restore validates a staged database, creates an automatic pre-restore recovery copy, and requires explicit `--confirm`. Close other Ayu processes before restore. Local databases and exports use owner-only POSIX permissions where supported; Windows ACL behavior follows the host directory policy.
 
 ## Local document search
 
@@ -121,48 +212,45 @@ Restore is destructive and requires `--confirm`; it validates a staged copy, mak
 ayu docs search ./my-documents "search phrase" --limit 20
 ```
 
-Search is a bounded lexical scan of selected text formats (TXT, Markdown, source code, JSON, CSV, TOML, YAML, HTML, CSS, shell and PowerShell). It does not upload files, parse every possible document format, or produce AI summaries/citations. The root must be supplied explicitly.
+This is a bounded lexical scan of selected text formats (TXT, Markdown, source, JSON, CSV, TOML, YAML, HTML, CSS, shell and PowerShell). It does not upload files or provide AI summaries/citations. It is separate from the model-assisted agent tools; both require explicit local paths/workspaces.
 
-## Native AyuLM research (optional PyTorch)
+## Native AyuLM: train, evaluate, generate, benchmark
 
-AyuLM-native uses a reversible UTF-8 byte tokenizer (260 token IDs), token embeddings, rotary positional encoding, causal multi-head self-attention, feed-forward blocks, normalization, tied output projection, autoregressive sampling, and next-byte cross-entropy training. It is an actual small-model research implementation, not trained weights. Train only on corpora you are entitled to use; the software does not check dataset license or provenance.
+AyuLM uses a reversible UTF-8 byte tokenizer, token embeddings, rotary positional encoding, causal multi-head attention, feed-forward blocks, normalization, tied output weights, autoregressive sampling, and next-byte cross-entropy. Train only with text you are entitled to use. The implementation does not validate dataset licenses.
 
 ```sh
 python -m pip install -e '.[training]'
-# Supply a local text corpus large enough for the chosen context length.
+ayu test --ayulm-smoke
+# Replace the corpus path with text you own or are licensed to use.
 ayu train --data ./licensed-or-owned-corpus.txt --output ./ayu-small.pt \
   --steps 200 --seq-len 64 --d-model 64 --heads 4 --layers 2 --seed 42
 ayu checkpoint inspect ./ayu-small.pt
 ayu evaluate ./ayu-small.pt --data ./heldout-text.txt
 ayu generate ./ayu-small.pt "Once upon a time" --tokens 80
+ayu benchmark ./ayu-small.pt --tokens 32 --repeats 3
 ayu train-resume ./ayu-small.pt --data ./licensed-or-owned-corpus.txt --steps 100
 ```
 
-The training pipeline uses a deterministic, disjoint byte-level train/validation split (at least `2 * (seq_len + 2)` bytes), saves model/optimizer/RNG state for resumption, validates the training corpus hash and model configuration when resuming, reports loss/perplexity, writes tokenizer metadata, and records a local model registry entry under `~/.ayu-ai/model-registry.json` by default. Use the same corpus when resuming. These are next-token metrics, not conversational benchmarks. Tiny corpora and tiny models typically produce poor, nonsensical generations. Training and checkpoint loading require the optional PyTorch package and adequate memory; GPU use is optional and device-specific. Checkpoints contain user-data provenance paths; do not publish them without reviewing metadata.
+The native pipeline uses a deterministic, disjoint internal train/validation byte split, saves optimizer/RNG state for resumption, checks corpus identity/configuration when resuming, and writes tokenizer metadata and a local model registry entry under `~/.ayu-ai/` by default. External `evaluate` data should be held out by the user. Benchmark reports local autoregressive throughput, not quality or a cross-machine score. Generated samples can be incoherent or contain replacement characters until a sufficiently large, appropriate corpus and training budget are used. Model files may be large and checkpoints record source paths; inspect metadata before sharing.
 
-## Commands and tests
+## Tests and platform support
 
 ```sh
 python -m pip install -e '.[dev]'
-ayu --help
-ayu chat --help
-ayu models --help
-ayu memory --help
-ayu project --help
-ayu tasks --help
+python -m compileall -q ayu tests
 python -m pytest -q
+ayu test
+ayu test --ayulm-smoke  # optional PyTorch required
 ```
 
-The default install includes NumPy for the retained compatibility prototype. Optional PyTorch is needed only for native AyuLM training. Basic commands do not need an API key, external database, GPU, Docker, or network access. Remote inference is opt-in; no hidden telemetry is implemented.
+Ordinary tests are offline and require no real credentials. Provider/API behavior is mocked. The optional AyuLM integration test uses a tiny synthetic corpus. The GitHub Actions workflow declares Linux, Windows, and macOS/Python 3.10–3.12 test jobs, plus a Linux CPU PyTorch job; these hosted jobs must actually complete successfully before their results are claimed. A separate workflow runs Gitleaks. The development/verification environment used for this release was Linux (Ubuntu sandbox), Python 3.12.3, CPU, and PyTorch 2.14.1+cpu. Windows, macOS, ARM, Android/Termux, CUDA, and live provider APIs were not manually tested here.
 
-Upgrade a source checkout with `git pull` followed by `python -m pip install --upgrade -e .` inside the active environment; review release notes and back up the local SQLite database first.
+## Implemented scope and limitations
 
-## Implemented versus not implemented
+Implemented: no-key basic CLI; persistent private local SQLite memory/project/task/chat state, same-project task dependencies, and backup/restore; local GGUF preflight/process adapter; optional OpenAI, Anthropic, and separate NewsAPI clients; bounded search/read tool registry; sequential planner/researcher/analyst/reviewer orchestration with schema/path checks and local audit events; AyuLM native training, resumption, evaluation, generation and benchmark; offline tests and CI definitions.
 
-Implemented and tested without network: command parsing, SQLite chat/memory/project/task storage, safe credential redaction in status/config output, local document lexical search, remote adapter request handling under mocked tests, and local llama.cpp preflight/process adapter. Optional native AyuLM architecture/training code is present; this environment has no PyTorch, so actual optimization, checkpoint round trips, and generated text have **not** been runtime-verified here.
+Not implemented: write/patch application, arbitrary shell or code execution, test-running agents, task dependency graphs, browser/MCP servers, vector embeddings, automatic model download/catalogue, full article retrieval, cancellable remote requests, encrypted database storage, multi-user access control, or production-service guarantees. These are deliberately not represented as working features. Cross-platform workflows exist but are not yet confirmed by successful hosted CI results; Termux remains documented, not verified.
 
-Not implemented: agent orchestration, autonomous task execution, shell/code execution, patch application, browser or external research, vector embeddings, project file indexing, online model catalogue/downloads, migration tooling beyond additive SQLite schema upgrades, cancellation during local inference, encrypted storage, multi-user access control, production service guarantees, and comprehensive Windows/Termux integration testing. Contributions should add these only with explicit safety policies and tests.
+## Upgrade and uninstall
 
-## Uninstall
-
-Uninstall the package from the active environment with `python -m pip uninstall ayu-ai`. This does not delete user data. Remove `~/.ayu-ai/` only if you intentionally want to erase the local database, registry, and checkpoints stored there.
+From a source checkout, update with `git pull` and `python -m pip install --upgrade -e .` in the active environment; review changes and back up the database first. `python -m pip uninstall ayu-ai` removes the package, not local user data. Remove `~/.ayu-ai/` only when you intentionally want to delete the database, registry, and any checkpoints stored there.
