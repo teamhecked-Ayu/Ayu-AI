@@ -55,12 +55,13 @@ class ProviderIntegrationTests(unittest.TestCase):
     def test_provider_specific_environment_keys_are_selected_without_network(self):
         with tempfile.TemporaryDirectory() as temporary:
             no_dotenv = Path(temporary) / "absent.env"
-            with patch.dict(os.environ, {"AYU_PROVIDER": "openai", "OPENAI_API_KEY": "openai-test", "ANTHROPIC_API_KEY": "anthropic-test", "NEWSAPI_API_KEY": "news-test"}, clear=True):
+            database=str(Path(temporary)/"state.sqlite3")
+            with patch.dict(os.environ, {"AYU_DATABASE":database,"AYU_PROVIDER": "openai", "OPENAI_API_KEY": "openai-test", "ANTHROPIC_API_KEY": "anthropic-test", "NEWSAPI_API_KEY": "news-test"}, clear=True):
                 settings = Settings.load(no_dotenv)
             self.assertEqual(settings.api_key, "openai-test")
             self.assertEqual(settings.remote_provider, "openai")
             self.assertEqual(settings.newsapi_api_key, "news-test")
-            with patch.dict(os.environ, {"AYU_PROVIDER": "anthropic", "OPENAI_API_KEY": "openai-test", "ANTHROPIC_API_KEY": "anthropic-test"}, clear=True):
+            with patch.dict(os.environ, {"AYU_DATABASE":database,"AYU_PROVIDER": "anthropic", "OPENAI_API_KEY": "openai-test", "ANTHROPIC_API_KEY": "anthropic-test"}, clear=True):
                 settings = Settings.load(no_dotenv)
             self.assertEqual(settings.api_key, "anthropic-test")
             self.assertEqual(build_remote_provider(settings).__class__, AnthropicProvider)
