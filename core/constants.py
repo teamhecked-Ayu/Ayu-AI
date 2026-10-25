@@ -1,7 +1,7 @@
 # Copyright 2024 GenesisAI Contributors
 # Licensed under the Apache License, Version 2.0
 
-
+"""
 Centralized, immutable constant definitions for the GenesisAI runtime.
 
 This module is the single source of truth for values that must remain
@@ -18,6 +18,7 @@ constraint exists so that every other module in the codebase can safely
 import `core.constants` during the earliest phase of interpreter
 start-up, before logging, configuration, or dependency injection have
 been initialized.
+"""
 
 
 from __future__ import annotations

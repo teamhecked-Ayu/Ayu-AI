@@ -1,132 +1,45 @@
 from __future__ import annotations
 
 import json
-import sqlite3
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ayu.config import default_config
 
+class ProjectManager:
+    def __init__(self, projects_path: str | Path | None = None):
+        self.projects_path = Path(projects_path) if projects_path else Path.home() / ".ayu" / "projects.json"
+        self.projects_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.projects_path.exists():
+            self.projects_path.write_text("[]", encoding="utf-8")
 
-@dataclass
-class MemoryRecord:
-    id: int | None
-    category: str
-    key: str
-    content: str
-    source: str
-    created_at: str
-    updated_at: str
-    metadata: str = "{}"
+    def list_projects(self) -> list[dict[str, Any]]:
+        data = json.loads(self.projects_path.read_text(encoding="utf-8") or "[]")
+        return data
 
+    def create_project(self, name: str, root: str | Path | None = None, goals: list[str] | None = None) -> dict[str, Any]:
+        project_root = Path(root) if root else Path.cwd() / name
+        project_root.mkdir(parents=True, exist_ok=True)
+        project_file = project_root / ".ayu-project.json"
+        payload = {
+            "name": name,
+            "root": str(project_root),
+            "goals": goals or [],
+            "status": "initialized",
+            "tasks": [],
+        }
+        project_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        data = self.list_projects()
+        data.append(payload)
+        self.projects_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        return payload
 
-class MemoryStore:
-    def __init__(self, db_path: str | Path | None = None):
-        self.db_path = Path(db_path) if db_path else Path(default_config()["runtime"]["memory_path"])
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
+    def inspect_project(self, name: str) -> dict[str, Any]:
+        for project in self.list_projects():
+            if project["name"] == name:
+                return project
+        raise FileNotFoundError(f"Project '{name}' not found")
 
-    def _init_db(self) -> None:
-        with sqlite3.connect(self.db_path) as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memories (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    category TEXT NOT NULL,
-                    key TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    source TEXT NOT NULL DEFAULT 'user',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    metadata TEXT NOT NULL DEFAULT '{}'
-                )
-                """
-            )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category)"
-            )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_memories_key ON memories(key)"
-            )
-            connection.commit()
-
-    def add(self, category: str, key: str, content: str, source: str = "user", metadata: dict[str, Any] | None = None) -> MemoryRecord:
-        metadata_json = json.dumps(metadata or {}, sort_keys=True)
-        created_at = _timestamp()
-        with sqlite3.connect(self.db_path) as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO memories (category, key, content, source, created_at, updated_at, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (category, key, content, source, created_at, created_at, metadata_json),
-            )
-            connection.commit()
-            memory_id = cursor.lastrowid
-        return self.get(memory_id)
-
-    def get(self, memory_id: int) -> MemoryRecord:
-        with sqlite3.connect(self.db_path) as connection:
-            row = connection.execute(
-                "SELECT id, category, key, content, source, created_at, updated_at, metadata FROM memories WHERE id = ?",
-                (memory_id,),
-            ).fetchone()
-        if row is None:
-            raise KeyError(f"Memory entry {memory_id} not found")
-        return MemoryRecord(*row)
-
-    def search(self, query: str, limit: int = 10) -> list[MemoryRecord]:
-        q = f"%{query.lower()}%"
-        with sqlite3.connect(self.db_path) as connection:
-            rows = connection.execute(
-                """
-                SELECT id, category, key, content, source, created_at, updated_at, metadata
-                FROM memories
-                WHERE lower(category) LIKE ? OR lower(key) LIKE ? OR lower(content) LIKE ?
-                ORDER BY updated_at DESC
-                LIMIT ?
-                """,
-                (q, q, q, limit),
-            ).fetchall()
-        return [MemoryRecord(*row) for row in rows]
-
-    def status(self) -> dict[str, Any]:
-        with sqlite3.connect(self.db_path) as connection:
-            rows = connection.execute("SELECT COUNT(*) FROM memories").fetchone()
-            categories = connection.execute(
-                "SELECT category, COUNT(*) FROM memories GROUP BY category ORDER BY category"
-            ).fetchall()
-        return {"count": rows[0], "categories": {category: count for category, count in categories}}
-
-    def delete(self, memory_id: int) -> bool:
-        with sqlite3.connect(self.db_path) as connection:
-            cursor = connection.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
-            connection.commit()
-        return cursor.rowcount > 0
-
-    def export_json(self, path: str | Path) -> Path:
-        target = Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        rows = self.search("", limit=100000)
-        items = [
-            {
-                "id": item.id,
-                "category": item.category,
-                "key": item.key,
-                "content": item.content,
-                "source": item.source,
-                "created_at": item.created_at,
-                "updated_at": item.updated_at,
-                "metadata": json.loads(item.metadata or "{}"),
-            }
-            for item in rows
-        ]
-        target.write_text(json.dumps(items, indent=2), encoding="utf-8")
-        return target
-
-
-def _timestamp() -> str:
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    def resume_project(self, name: str) -> dict[str, Any]:
+        project = self.inspect_project(name)
+        project["status"] = "resumed"
+        return project

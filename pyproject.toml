@@ -4,18 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ayu-ai"
-version = "0.1.0"
-description = "AYU AI: a terminal-first, local-first AI operating system for projects, memory, and local model workflows."
+version = "0.2.0"
+description = "Ayu AI: a terminal-first, local-first AI assistant and AyuLM research foundation."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "teamhecked-Ayu" }]
-license = { text = "Apache-2.0" }
+license = { file = "LICENSE" }
 dependencies = [
   "numpy>=1.26.0",
   "tomli>=2.0.1; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
+training = ["torch>=2.1.0"]
 dev = ["pytest>=8.0.0"]
 
 [project.scripts]
@@ -30,3 +31,4 @@ exclude = ["tests*", "docs*", "build*", "dist*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+testpaths = ["tests"]

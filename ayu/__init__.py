@@ -1,1 +1,3 @@
-__version__ = "0.1.0"
+"""Ayu AI: a modular, local-first terminal assistant and AyuLM research foundation."""
+
+__version__ = "0.2.0"

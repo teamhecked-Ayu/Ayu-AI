@@ -1,6 +1,7 @@
 # Copyright 2024 GenesisAI Contributors
 # Licensed under the Apache License, Version 2.0
 
+"""
 The `core` package provides the foundational, dependency-free (aside
 from the Python standard library) primitives shared by every other
 GenesisAI subsystem: constants, the exception hierarchy, configuration
