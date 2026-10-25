@@ -243,13 +243,13 @@ ayu test
 ayu test --ayulm-smoke  # optional PyTorch required
 ```
 
-Ordinary tests are offline and require no real credentials. Provider/API behavior is mocked. The optional AyuLM integration test uses a tiny synthetic corpus. The GitHub Actions workflow declares Linux, Windows, and macOS/Python 3.10–3.12 test jobs, plus a Linux CPU PyTorch job; these hosted jobs must actually complete successfully before their results are claimed. A separate workflow runs Gitleaks. The development/verification environment used for this release was Linux (Ubuntu sandbox), Python 3.12.3, CPU, and PyTorch 2.14.1+cpu. Windows, macOS, ARM, Android/Termux, CUDA, and live provider APIs were not manually tested here.
+Ordinary tests are offline and require no real credentials. Provider/API behavior is mocked. The optional AyuLM integration test uses a tiny synthetic corpus. The latest observed GitHub Actions core matrix completed successfully on Linux, Windows, and macOS with Python 3.10, 3.11, and 3.12 (nine jobs); the separate secret scan also passed. The hosted CPU AyuLM job in that same latest run was still in progress when this note was written (it passed in an earlier run); check the linked commit's Actions page before relying on a later result. The development/verification environment used for this release was Linux (Ubuntu sandbox), Python 3.12.3, CPU, and PyTorch 2.14.1+cpu. Windows and macOS were CI-tested, not manually tested. ARM, Android/Termux, CUDA, and live provider APIs were not tested.
 
 ## Implemented scope and limitations
 
 Implemented: no-key basic CLI; persistent private local SQLite memory/project/task/chat state, same-project task dependencies, and backup/restore; local GGUF preflight/process adapter; optional OpenAI, Anthropic, and separate NewsAPI clients; bounded search/read tool registry; sequential planner/researcher/analyst/reviewer orchestration with schema/path checks and local audit events; AyuLM native training, resumption, evaluation, generation and benchmark; offline tests and CI definitions.
 
-Not implemented: write/patch application, arbitrary shell or code execution, test-running agents, task dependency graphs, browser/MCP servers, vector embeddings, automatic model download/catalogue, full article retrieval, cancellable remote requests, encrypted database storage, multi-user access control, or production-service guarantees. These are deliberately not represented as working features. Cross-platform workflows exist but are not yet confirmed by successful hosted CI results; Termux remains documented, not verified.
+Not implemented: write/patch application, arbitrary shell or code execution, test-running agents, cross-project/advanced workflow orchestration, browser/MCP servers, vector embeddings, automatic model download/catalogue, full article retrieval, cancellable remote requests, encrypted database storage, multi-user access control, or production-service guarantees. These are deliberately not represented as working features. Termux remains documented, not verified on an Android device.
 
 ## Upgrade and uninstall
 
