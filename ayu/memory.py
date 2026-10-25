@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import tempfile
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,7 +35,7 @@ class MemoryStore:
             self.db_path.chmod(0o600)
 
     def _init_db(self) -> None:
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS memories (
@@ -60,7 +61,7 @@ class MemoryStore:
     def add(self, category: str, key: str, content: str, source: str = "user", metadata: dict[str, Any] | None = None) -> MemoryRecord:
         metadata_json = json.dumps(metadata or {}, sort_keys=True)
         created_at = _timestamp()
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO memories (category, key, content, source, created_at, updated_at, metadata)
@@ -73,7 +74,7 @@ class MemoryStore:
         return self.get(memory_id)
 
     def get(self, memory_id: int) -> MemoryRecord:
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             row = connection.execute(
                 "SELECT id, category, key, content, source, created_at, updated_at, metadata FROM memories WHERE id = ?",
                 (memory_id,),
@@ -84,7 +85,7 @@ class MemoryStore:
 
     def search(self, query: str, limit: int = 10) -> list[MemoryRecord]:
         q = f"%{query.lower()}%"
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             rows = connection.execute(
                 """
                 SELECT id, category, key, content, source, created_at, updated_at, metadata
@@ -98,7 +99,7 @@ class MemoryStore:
         return [MemoryRecord(*row) for row in rows]
 
     def status(self) -> dict[str, Any]:
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             rows = connection.execute("SELECT COUNT(*) FROM memories").fetchone()
             categories = connection.execute(
                 "SELECT category, COUNT(*) FROM memories GROUP BY category ORDER BY category"
@@ -106,7 +107,7 @@ class MemoryStore:
         return {"count": rows[0], "categories": {category: count for category, count in categories}}
 
     def delete(self, memory_id: int) -> bool:
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             cursor = connection.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
             connection.commit()
         return cursor.rowcount > 0

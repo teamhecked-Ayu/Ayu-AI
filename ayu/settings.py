@@ -82,7 +82,8 @@ class Settings:
             api_key = os.getenv("AYU_API_KEY")
         raw_local_model = os.getenv("AYU_LOCAL_MODEL", "").strip()
         model_path = Path(raw_local_model).expanduser() if raw_local_model else None
-        db_path = Path(os.getenv("AYU_DATABASE", str(Path.home() / ".ayu-ai" / "ayu.sqlite3"))).expanduser()
+        raw_database = os.getenv("AYU_DATABASE")
+        db_path = Path(raw_database).expanduser() if raw_database else Path.home() / ".ayu-ai" / "ayu.sqlite3"
         return cls(
             api_key=api_key,
             base_url=base_url,

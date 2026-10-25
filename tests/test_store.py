@@ -1,3 +1,4 @@
+import contextlib
 import tempfile
 import os
 import sqlite3
@@ -68,8 +69,9 @@ class StoreTests(unittest.TestCase):
 
     def test_additive_migration_preserves_legacy_memory_rows(self):
         legacy=Path(self.temp.name)/"legacy.sqlite3"
-        with sqlite3.connect(legacy) as db:
+        with contextlib.closing(sqlite3.connect(legacy)) as db:
             db.executescript("CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,content TEXT NOT NULL,created_at TEXT NOT NULL); CREATE TABLE memories(id INTEGER PRIMARY KEY,content TEXT NOT NULL,created_at TEXT NOT NULL); INSERT INTO memories(content,created_at) VALUES('old memory','2025-01-01T00:00:00+00:00');")
+            db.commit()
         migrated=Store(legacy)
         rows=migrated.recall("old memory")
         self.assertEqual(rows[0]["category"],"semantic")
