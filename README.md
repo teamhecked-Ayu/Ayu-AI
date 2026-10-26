@@ -5,7 +5,7 @@ Ayu AI is a terminal-first, local-first software foundation. It is useful withou
 ## Operating modes and optional services
 
 - **Basic:** local CLI, SQLite conversation/memory/project/task records, configuration checks, and bounded lexical text search. It does not pretend to provide LLM reasoning.
-- **Local inference:** an explicitly selected, already-installed `llama.cpp` `llama-cli` and a user-supplied compatible GGUF. Ayu does not download weights or contact an AI provider in local mode.
+- **Local inference:** an explicitly selected, already-installed llama.cpp runtime and a user-supplied compatible GGUF. The preferred `llama-server` backend preserves chat roles for the model's template and checks the server's actual token/context budget; the `llama-cli` adapter remains for backward compatibility. Ayu does not download weights or contact an AI provider in local mode.
 - **Remote inference:** explicitly selected OpenAI, Anthropic, or OpenAI-compatible adapter. Remote calls require credentials/model configuration and an explicit remote chat/agent command (or `AYU_MODE=remote`); there is no fallback between providers.
 - **NewsAPI:** optional article-metadata search, independent from AI inference. It is disabled unless `AYU_NEWSAPI_ENABLED=true`, a NewsAPI key is configured, and the command includes `--allow-network`. Results are untrusted external metadata and are not automatically sent to an AI provider.
 - **AyuLM research:** native byte-level training, held-out validation, checkpoint/resume, evaluation, generation, and local throughput benchmark. PyTorch is optional. A model trained from scratch on a tiny corpus is not a conversational assistant.
@@ -91,7 +91,14 @@ Configuration can be set in the process environment or a simple `.env` in the cu
 AYU_MODE=local
 AYU_MEMORY_ENABLED=true
 AYU_LOCAL_MODEL=/absolute/path/to/a-compatible-model.gguf
-AYU_LLAMA_CLI=llama-cli
+# Preferred backend: run a llama.cpp server bound to 127.0.0.1 first.
+AYU_LOCAL_BACKEND=llama-server
+AYU_LLAMA_SERVER_URL=http://127.0.0.1:9931
+# Optional when the local server serves multiple model IDs.
+# AYU_LOCAL_MODEL_ID=exact-id-from-v1-models
+# Legacy backend only: AYU_LOCAL_BACKEND=llama-cli
+# AYU_LLAMA_CLI=llama-cli
+# AYU_LOCAL_MAX_INPUT_CHARS=65536
 # AYU_DATABASE=~/.ayu-ai/ayu.sqlite3
 # AYU_LOCAL_TIMEOUT=300
 ```
@@ -100,28 +107,52 @@ Set `AYU_MEMORY_ENABLED=false` to disable persistent-memory retrieval/writes in 
 
 ## Local GGUF inference
 
-Install/build `llama-cli` from the upstream llama.cpp project using instructions suitable for your operating system, obtain a compatible GGUF from a source you trust, and review its license and hardware requirements. Ayu does not choose/download weights. Configure paths explicitly:
+The **recommended `llama-server` backend** uses llama.cpp's OpenAI-compatible chat-completions route, so message roles reach the runtime's model-specific chat template rather than being flattened by Ayu. It also asks that same server to count the templated input tokens and reads the effective context from `/props`; Ayu rejects a request whose input plus configured output budget exceeds that context. The backend requires a current llama.cpp server implementing `/health`, `/v1/models`, `/props`, `/v1/chat/completions/input_tokens`, and JSON-Schema-constrained chat responses.
+
+Install/build llama.cpp separately, following the [official repository/build guide](https://github.com/ggml-org/llama.cpp) and [server documentation](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md). On Linux/macOS with CMake and a C++ compiler installed, a CPU build can be made with:
+
+```sh
+git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$HOME/src/llama.cpp"
+cmake -S "$HOME/src/llama.cpp" -B "$HOME/src/llama.cpp/build" -DCMAKE_BUILD_TYPE=Release
+cmake --build "$HOME/src/llama.cpp/build" --config Release --target llama-server -j 2
+```
+
+Model files are separate user-managed downloads; Ayu never downloads them. As a small reproducible example, the Qwen publisher lists the Qwen2.5-0.5B-Instruct Q4_K_M GGUF as Apache-2.0 and 491,400,032 bytes. Review the [model card/license](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF) before use. This immutable download URL and SHA-256 correspond to the publisher's listed file; download only if you explicitly choose this example:
+
+```sh
+mkdir -p "$HOME/models"
+curl -L --fail --retry 3 \
+  'https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/6dd44a1fb35d11b5d1b28902876ce3cc9e882d0e/qwen2.5-0.5b-instruct-q4_k_m.gguf' \
+  -o "$HOME/models/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+echo '74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db  '"$HOME/models/qwen2.5-0.5b-instruct-q4_k_m.gguf" | sha256sum --check
+```
+
+Choose a context size your RAM can handle; 4096 is a modest starting point, not a hardware guarantee. Start the server in a separate terminal and bind it only to loopback:
+
+```sh
+export AYU_LOCAL_MODEL="$HOME/models/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+"$HOME/src/llama.cpp/build/bin/llama-server" \
+  -m "$AYU_LOCAL_MODEL" -c 4096 --host 127.0.0.1 --port 9931
+```
+
+In another terminal, configure Ayu and test it:
 
 ```sh
 export AYU_MODE=local
-export AYU_LOCAL_MODEL="$HOME/models/model.gguf"
-export AYU_LLAMA_CLI="$(command -v llama-cli)"
-ayu models verify
-ayu chat --mode local
-ayu chat --mode local --role coder --once "Explain this error: ..."
+export AYU_LOCAL_BACKEND=llama-server
+export AYU_LOCAL_MODEL="$HOME/models/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+export AYU_LLAMA_SERVER_URL=http://127.0.0.1:9931
+export AYU_MAX_OUTPUT_TOKENS=256
+ayu models verify                 # file, server health, model ID/path, and context metadata only
+ayu models verify --infer         # sends a short prompt and requires non-empty generated text
+ayu chat --mode local --once "Explain what a context window is in one sentence."
 ```
 
-PowerShell equivalent:
+`AYU_LOCAL_MODEL_ID` is optional for a single-model server, and required if multiple models are reported. Ayu accepts only a numeric loopback server URL (`127.0.0.0/8` or `::1`), disables proxy routing by using a direct socket, checks the GGUF path reported by `/props` against `AYU_LOCAL_MODEL`, and never contacts a remote provider from local mode. If the server reports that input plus output tokens exceed its actual context, shorten the prompt/history or restart it with a larger `-c`; Ayu does not silently truncate chat history. `AYU_LOCAL_MAX_INPUT_CHARS` (default 65,536; maximum 1,000,000) is an additional pre-network request-size guard, not a substitute for tokenizer-based context validation.
 
-```powershell
-$env:AYU_MODE = "local"
-$env:AYU_LOCAL_MODEL = "$HOME\models\model.gguf"
-$env:AYU_LLAMA_CLI = "llama-cli"
-ayu models verify
-ayu chat --mode local
-```
+`ayu models verify` is only a preflight; it does **not** prove generation. `ayu models verify --infer` is the explicit inference request. The optional real-server integration test is skipped unless both `AYU_TEST_LLAMA_SERVER_URL` and `AYU_TEST_LLAMA_MODEL` point to a running loopback server and its model file. Fake-server tests verify only HTTP protocol/error behavior, not model loading or quality. The retained `llama-cli` backend continues to use a bounded prompt file and has process timeout/output limits, but it does not provide the server backend's chat-template token-count/context guarantee. Neither backend is an OS sandbox: the configured runtime/model parser runs with the current user's privileges. Runtime failure never triggers remote fallback.
 
-`models verify` checks a nonempty/readable GGUF path and runtime executable; it cannot guarantee that a particular architecture/quantization is supported or that the model fits RAM. Local runs have a configured wall-time limit and cap captured stdout/stderr at 4 MiB per stream; runtime diagnostics are suppressed because they may echo prompt content. The configured binary still runs with your OS user's privileges—it is not sandboxed. No real GGUF/llama.cpp inference was available for verification in the development sandbox. Runtime failure never triggers remote fallback.
+PowerShell can set the same variables with `$env:AYU_MODE = "local"`, `$env:AYU_LOCAL_BACKEND = "llama-server"`, `$env:AYU_LOCAL_MODEL = "C:\models\model.gguf"`, and `$env:AYU_LLAMA_SERVER_URL = "http://127.0.0.1:9931"`. For a standalone `llama-cli` workflow, set `AYU_LOCAL_BACKEND=llama-cli` and `AYU_LLAMA_CLI` to the installed executable; the stronger context-aware chat check is specific to `llama-server`.
 
 ## Optional OpenAI, Anthropic, and NewsAPI
 
@@ -178,7 +209,29 @@ Local mode requires a working local GGUF configuration. Remote mode sends the ta
 ayu agents run "Summarize the config timeout implementation" --workspace . --mode remote --allow-remote-context
 ```
 
-Use that flag only when you consent to sending the selected excerpts. The agent does not modify files or run tests; review its report yourself. End-to-end agent behavior has been verified with deterministic provider mocks, not a real remote model or an available GGUF model.
+Use that flag only when you consent to sending the selected excerpts. The read-only agent does not modify files or run tests; review its report yourself. Its multi-agent orchestration has been verified with deterministic provider mocks, not with a real model or a live remote provider.
+
+## Bounded local coding workflow
+
+`ayu code run` adds a narrowly scoped local coding loop and requires `AYU_LOCAL_BACKEND=llama-server` with JSON-Schema-constrained response support; `llama-cli` remains available for ordinary local chat but is not used for coding. It requires a clean Git repository root and creates a separate temporary Git worktree and task branch. The local model plans and reads at most the first 150 lines of each of up to three selected tracked text files. Each role uses strict JSON-Schema-constrained output; the workflow patches only inspected, existing implementation files, never test files, with up to five non-overlapping exact-context replacements and per-file atomic replacement plus best-effort rollback. New-file creation is not part of this initial workflow. It runs one fixed Python test suite, permits at most one correction after a test failure, and asks a model reviewer to inspect the diff. It stores run status, hashes, the final diff, and verification evidence in the local audit database; test output is limited to hashed, bounded, best-effort-redacted excerpts (full output is not persisted). Nothing is committed or pushed; the returned worktree path is where the uncommitted result can be reviewed. A failure after run creation reports its `RUN_ID` so `ayu code inspect RUN_ID` can recover the audit events and worktree path. Interrupted work remains unverified and is not automatically resumed.
+
+```sh
+# Start llama-server as described above, then set the same local configuration:
+export AYU_MODE=local
+export AYU_LOCAL_BACKEND=llama-server
+export AYU_LOCAL_MODEL="$HOME/models/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+export AYU_LLAMA_SERVER_URL=http://127.0.0.1:9931
+export AYU_MAX_OUTPUT_TOKENS=512
+
+# Choose a fixed Python suite. This flag is mandatory for any test execution.
+ayu code run "Fix the failing calculator addition test" --workspace /path/to/clean/repo \
+  --test-suite pytest --test-path tests --allow-host-tests
+ayu code inspect RUN_ID
+```
+
+Supported suites are `pytest`, `unittest`, and `compileall`; model-generated shell commands are never executed. Test paths must be workspace-relative; safe directories such as `tests/` and allow-listed text-source files are accepted, while hidden, denied, and symlink paths are rejected. Each test process has a timeout (default 120 seconds, maximum 600) and bounded captured output. POSIX timeout handling attempts to terminate the process group; on Windows, only the direct child is terminated, so descendant cleanup is not guaranteed. The child environment is reduced and API-key variables are not inherited. **This is not an OS sandbox:** opted-in repository tests run with the current user account, may access files outside the worktree or the network, and may perform other side effects. Use only a repository and tests you trust; use a disposable OS/container sandbox when you need stronger isolation. Ayu refuses dirty source worktrees, configured Git filters/hooks, path traversal, symlink edits, stale/ambiguous contexts, and unsupported file types. Coding inference is local-only in this initial implementation; no coding context is sent to a remote provider.
+
+The coding loop passed one narrow real-model smoke test on this Linux sandbox: local Qwen2.5-0.5B GGUF through loopback `llama-server` changed one calculator implementation in a separate worktree, its one `unittest` test passed, and the reviewer returned `supported`. A later repeat was safely rejected because the model's exact old-text patch did not match the inspected source; it made no edit and ran no test. This demonstrates one happy path and one fail-closed refusal, not reliable general coding quality. The regression suite also uses fake providers. Windows/macOS coding runs, OS-level sandboxing, crash-resume, and arbitrary non-Python test runners remain unverified. Model review is not independent evidence; inspect the diff and test result yourself before accepting it.
 
 ## Memory, projects, and recovery
 
@@ -243,13 +296,13 @@ ayu test
 ayu test --ayulm-smoke  # optional PyTorch required
 ```
 
-Ordinary tests are offline and require no real credentials. Provider/API behavior is mocked. The optional AyuLM integration test uses a tiny synthetic corpus. The latest observed GitHub Actions core matrix completed successfully on Linux, Windows, and macOS with Python 3.10, 3.11, and 3.12 (nine jobs); the separate secret scan also passed. The hosted CPU AyuLM job in that same latest run was still in progress when this note was written (it passed in an earlier run); check the linked commit's Actions page before relying on a later result. The development/verification environment used for this release was Linux (Ubuntu sandbox), Python 3.12.3, CPU, and PyTorch 2.14.1+cpu. Windows and macOS were CI-tested, not manually tested. ARM, Android/Termux, CUDA, and live provider APIs were not tested.
+Ordinary tests are offline and require no real credentials. Provider/API behavior is mocked. The optional AyuLM integration test uses a tiny synthetic corpus. GitHub Actions run [40189952813](https://github.com/teamhecked-Ayu/Ayu-AI/actions/runs/40189952813) on commit `4f72c099` completed successfully on 2026-10-25: nine core jobs covered Ubuntu, Windows, and macOS with Python 3.10, 3.11, and 3.12, and the CPU AyuLM train/checkpoint/generation job passed. Separate Gitleaks run [40189952758](https://github.com/teamhecked-Ayu/Ayu-AI/actions/runs/40189952758) also passed. These results are only for pre-coding baseline commit `4f72c099`; they do not verify later changes. Check the feature-branch Actions run at the published commit before treating this coding workflow as cross-platform CI-verified. The development/verification environment used for this task was Linux (Ubuntu sandbox), Python 3.12.3, CPU, and PyTorch 2.14.1+cpu. Windows and macOS are CI-tested for the baseline commit, not manually tested. ARM, Android/Termux, CUDA, and live provider APIs were not tested.
 
 ## Implemented scope and limitations
 
-Implemented: no-key basic CLI; persistent private local SQLite memory/project/task/chat state, same-project task dependencies, and backup/restore; local GGUF preflight/process adapter; optional OpenAI, Anthropic, and separate NewsAPI clients; bounded search/read tool registry; sequential planner/researcher/analyst/reviewer orchestration with schema/path checks and local audit events; AyuLM native training, resumption, evaluation, generation and benchmark; offline tests and CI definitions.
+Implemented: no-key basic CLI; persistent private local SQLite memory/project/task/chat state, same-project task dependencies, and backup/restore; local GGUF preflight/process adapter; optional OpenAI, Anthropic, and separate NewsAPI clients; bounded search/read tool registry; sequential planner/researcher/analyst/reviewer orchestration with schema/path checks and local audit events; a local-only bounded coding loop with clean-repository checks, temporary Git worktrees, exact-context atomic patches, fixed allow-listed Python verification, one correction, and persisted review/diff evidence; AyuLM native training, resumption, evaluation, generation and benchmark; offline tests and CI definitions.
 
-Not implemented: write/patch application, arbitrary shell or code execution, test-running agents, cross-project/advanced workflow orchestration, browser/MCP servers, vector embeddings, automatic model download/catalogue, full article retrieval, cancellable remote requests, encrypted database storage, multi-user access control, or production-service guarantees. These are deliberately not represented as working features. Termux remains documented, not verified on an Android device.
+Not implemented or not verified: OS-level sandboxing/resource isolation for coding tests; resumable coding-agent execution after process interruption; remote coding mode; arbitrary shell or user-defined test commands; non-Python coding/test runners; crash-safe multi-file transaction across power loss; cross-project/advanced workflow orchestration; browser/MCP servers; vector embeddings; automatic model download/catalogue; full article retrieval; cancellable remote requests; encrypted database storage; multi-user access control; or production-service guarantees. Termux remains documented, not verified on an Android device.
 
 ## Upgrade and uninstall
 

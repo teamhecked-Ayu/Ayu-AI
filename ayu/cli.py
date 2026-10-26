@@ -4,7 +4,7 @@ import argparse, contextlib, json, os, re, shutil, sqlite3, sys, tempfile, uuid
 from pathlib import Path
 from . import __version__
 from .settings import Settings
-from .provider import LlamaCppProvider, NewsAPIClient, ProviderError, build_remote_provider, remote_endpoint_error
+from .provider import LlamaCppProvider, LlamaServerProvider, NewsAPIClient, ProviderError, build_local_provider, build_remote_provider, remote_endpoint_error
 from .store import MEMORY_CATEGORIES, Store
 
 SYSTEM = ("You are Ayu AI, a careful assistant. Be candid about uncertainty. Do not claim to have executed code, "
@@ -34,7 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
     ms = models.add_subparsers(dest="models_command", required=True)
     ms.add_parser("list", help="List configured local/remote models")
     ms.add_parser("info", help="Show model configuration without secrets")
-    ms.add_parser("verify", help="Verify the configured local GGUF file and llama.cpp executable")
+    model_verify = ms.add_parser("verify", help="Preflight the configured local model/runtime; use --infer to test actual generation")
+    model_verify.add_argument("--infer", action="store_true", help="Load/use the selected local model and require a non-empty generated response")
     memory = sub.add_parser("memory", help="Manage private, local SQLite memories")
     mem = memory.add_subparsers(dest="memory_command", required=True)
     mem.add_parser("status", help="Show memory count and storage location")
@@ -97,6 +98,17 @@ def build_parser() -> argparse.ArgumentParser:
     agent_run.add_argument("--allow-remote-context", action="store_true", help="Explicitly allow selected local excerpts to be sent to the configured remote provider")
     agent_inspect = ag.add_parser("inspect", help="Inspect a persisted agent run and its local audit events")
     agent_inspect.add_argument("run_id")
+    code = sub.add_parser("code", help="Run a bounded local-model coding task in an isolated Git worktree")
+    code_sub = code.add_subparsers(dest="code_command", required=True)
+    code_run = code_sub.add_parser("run", help="Plan, edit, test, review, and preserve a local diff")
+    code_run.add_argument("task", nargs="+", help="Requested code outcome; never interpreted as a shell command")
+    code_run.add_argument("--workspace", type=Path, required=True, help="Clean Git repository root; changes go only to a separate temporary worktree")
+    code_run.add_argument("--test-suite", choices=("pytest", "unittest", "compileall"), required=True, help="Fixed, allow-listed Python verification command")
+    code_run.add_argument("--test-path", action="append", default=[], help="Optional workspace-relative file/directory for pytest or compileall; unittest accepts one discovery directory; may be repeated")
+    code_run.add_argument("--timeout", type=int, default=120, help="Per-test-process timeout in seconds (1..600)")
+    code_run.add_argument("--allow-host-tests", action="store_true", help="Explicitly allow repository tests to execute with this OS account; Ayu does not provide an OS sandbox")
+    code_inspect = code_sub.add_parser("inspect", help="Inspect the persistent status, diff, and verification evidence for a coding run")
+    code_inspect.add_argument("run_id")
     news = sub.add_parser("news", help="Optional NewsAPI.org metadata search; no AI provider is called")
     news_sub = news.add_subparsers(dest="news_command", required=True)
     news_search = news_sub.add_parser("search", help="Search article metadata with NewsAPI.org")
@@ -154,7 +166,7 @@ def run_chat(store: Store, settings: Settings, args: argparse.Namespace) -> int:
     if mode == "basic":
         print("Basic mode provides local CLI, memory, project, task, and document-search features; it does not perform LLM inference. Use --mode local with a verified model, or explicitly --mode remote with provider credentials.", file=sys.stderr)
         return 2
-    provider = LlamaCppProvider(settings) if mode == "local" else build_remote_provider(settings)
+    provider = build_local_provider(settings) if mode == "local" else build_remote_provider(settings)
     session_id = args.session or uuid.uuid4().hex[:12]
     print(f"Ayu AI session: {session_id} (mode: {mode}; role: {args.role})")
     if mode == "local":
@@ -167,11 +179,32 @@ def run_chat(store: Store, settings: Settings, args: argparse.Namespace) -> int:
         context = lexical_context(store, text) if settings.memory_enabled else ""
         if context: msgs.append({"role":"system","content":context})
         msgs.extend(store.history(session_id))
-        try: answer = provider.complete(msgs)
-        except ProviderError as exc:
-            print(f"Ayu error: {exc}", file=sys.stderr); return False
+        if isinstance(provider,LlamaServerProvider):
+            pieces=[]
+            print("Ayu: ",end="",flush=True)
+            stream=provider.stream_complete(msgs)
+            try:
+                for piece in stream:
+                    pieces.append(piece)
+                    print(piece,end="",flush=True)
+            except KeyboardInterrupt:
+                print("\nAyu response cancelled; the partial response was not saved.")
+                return False
+            except ProviderError as exc:
+                print(f"\nAyu error: {exc}",file=sys.stderr); return False
+            finally:
+                stream.close()
+            answer="".join(pieces).strip()
+            if not answer:
+                print("\nAyu error: local server stream returned no text.",file=sys.stderr); return False
+            print("\n")
+        else:
+            try: answer = provider.complete(msgs)
+            except ProviderError as exc:
+                print(f"Ayu error: {exc}", file=sys.stderr); return False
+            print(f"\n{answer}\n")
         store.add_message(session_id, "assistant", answer)
-        print(f"\n{answer}\n"); return True
+        return True
     if args.once is not None: return 0 if ask(args.once) else 1
     while True:
         try: line = input("you> ").strip()
@@ -337,13 +370,47 @@ def run_agent(store: Store, settings: Settings, args: argparse.Namespace) -> int
             project_id = project["id"]
         if not 1 <= args.max_steps <= 4: raise ToolError("--max-steps must be between 1 and 4.")
         tools = ToolRegistry(workspace)
-        provider = LlamaCppProvider(settings) if mode == "local" else build_remote_provider(settings)
+        provider = build_local_provider(settings) if mode == "local" else build_remote_provider(settings)
         runner = AgentRunner(provider, store, tools, mode=mode)
         result = runner.run(" ".join(args.task), max_steps=args.max_steps, project_id=project_id)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except (AgentRunError, ToolError, OSError, ValueError) as exc:
         print(f"Agent run failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def run_coding(store: Store, settings: Settings, args: argparse.Namespace) -> int:
+    from .coding import CodeRunError, CodingRunner
+    if args.code_command == "inspect":
+        run = store.get_agent_run(args.run_id)
+        if run is None:
+            print("Coding run not found.", file=sys.stderr); return 1
+        events = []
+        for event in store.list_agent_events(args.run_id):
+            payload = json.loads(event.pop("payload_json"))
+            events.append({**event, "payload": payload})
+        print(json.dumps({"run": run, "events": events}, ensure_ascii=False, indent=2))
+        return 0
+    if settings.mode != "local":
+        print("Coding runs require AYU_MODE=local; remote coding-context transfer is not enabled in this initial implementation.", file=sys.stderr)
+        return 2
+    if not args.allow_host_tests:
+        print("Coding tests execute with this OS account and Ayu does not provide an OS sandbox. Re-run with --allow-host-tests only if you trust the repository tests.", file=sys.stderr)
+        return 2
+    if settings.local_backend != "llama-server":
+        print("Coding runs require AYU_LOCAL_BACKEND=llama-server for strict local JSON Schema output; llama-cli remains available for ordinary local chat.", file=sys.stderr)
+        return 2
+    try:
+        provider = build_local_provider(settings)
+        runner = CodingRunner(provider, store, mode="local")
+        result = runner.run(" ".join(args.task), args.workspace, suite=args.test_suite,
+                            test_paths=args.test_path, timeout=args.timeout,
+                            allow_host_tests=args.allow_host_tests)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result["status"] == "completed" else 1
+    except (CodeRunError, ProviderError, OSError, ValueError) as exc:
+        print(f"Coding run failed: {exc}", file=sys.stderr)
         return 1
 
 
@@ -361,7 +428,7 @@ def main(argv: list[str] | None = None) -> int:
         target = Path.cwd() / ".env"
         if target.exists() and not args.force: print(f"Configuration already exists at {target}; not overwriting. Use --force to replace it."); return 1
         try:
-            target.write_text("# Ayu AI local configuration. No API key is required for basic/local mode.\nAYU_MODE=local\nAYU_MEMORY_ENABLED=true\n# AYU_LOCAL_MODEL=/absolute/path/to/model.gguf\n# AYU_LLAMA_CLI=llama-cli\n# AYU_DATABASE=~/.ayu-ai/ayu.sqlite3\n# Select one optional remote inference provider explicitly:\n# AYU_MODE=remote\n# AYU_PROVIDER=openai\n# OPENAI_API_KEY=placeholder-only\n# AYU_MODEL=your-openai-model-id\n# AYU_PROVIDER=anthropic\n# ANTHROPIC_API_KEY=placeholder-only\n# ANTHROPIC_MODEL=your-anthropic-model-id\n# For OpenAI-compatible services use AYU_PROVIDER=openai-compatible, AYU_API_KEY, AYU_BASE_URL, AYU_MODEL.\n# Optional NewsAPI requires NEWSAPI_API_KEY and AYU_NEWSAPI_ENABLED=true; searches require --allow-network.\n",encoding="utf-8")
+            target.write_text("# Ayu AI local configuration. No API key is required for basic/local mode.\nAYU_MODE=local\nAYU_MEMORY_ENABLED=true\n# AYU_LOCAL_MODEL=/absolute/path/to/model.gguf\n# Preferred chat-template-aware backend: start llama-server separately, bound to 127.0.0.1.\n# AYU_LOCAL_BACKEND=llama-server\n# AYU_LLAMA_SERVER_URL=http://127.0.0.1:9931\n# AYU_LOCAL_MODEL_ID=optional-exact-id-from-v1-models\n# Legacy one-shot CLI backend: AYU_LOCAL_BACKEND=llama-cli and AYU_LLAMA_CLI=llama-cli\n# AYU_LOCAL_MAX_INPUT_CHARS=65536\n# AYU_DATABASE=~/.ayu-ai/ayu.sqlite3\n# Select one optional remote inference provider explicitly:\n# AYU_MODE=remote\n# AYU_PROVIDER=openai\n# OPENAI_API_KEY=placeholder-only\n# AYU_MODEL=your-openai-model-id\n# AYU_PROVIDER=anthropic\n# ANTHROPIC_API_KEY=placeholder-only\n# ANTHROPIC_MODEL=your-anthropic-model-id\n# For OpenAI-compatible services use AYU_PROVIDER=openai-compatible, AYU_API_KEY, AYU_BASE_URL, AYU_MODEL.\n# Optional NewsAPI requires NEWSAPI_API_KEY and AYU_NEWSAPI_ENABLED=true; searches require --allow-network.\n",encoding="utf-8")
             try: target.chmod(0o600)
             except OSError: pass
         except OSError as exc:
@@ -373,16 +440,21 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError,OSError) as exc:
         print(f"Configuration error: {exc}", file=sys.stderr); return 2
     cmd = args.command
+    if cmd == "code": return run_coding(store, settings, args)
     if cmd == "doctor":
         parent = settings.database_path.parent
         remote_selected=settings.mode=="remote"
         endpoint_ok = settings.remote_provider == "anthropic" or remote_endpoint_error(settings.base_url) is None
         remote_ready=bool(settings.api_key and settings.model) and endpoint_ok
-        checks = [("Python",sys.version_info >= (3,10),sys.version.split()[0]),("Database directory",parent.exists() and parent.is_dir(),str(parent)),("Local model",not settings.local_model_path or settings.local_model_path.is_file(),str(settings.local_model_path or "not configured")),("llama.cpp",bool(shutil.which(settings.llama_cli)) or Path(settings.llama_cli).is_file(),settings.llama_cli),("Remote configuration",remote_ready if remote_selected else True,"ready" if remote_ready else "incomplete/unsafe; optional unless AYU_MODE=remote")]
-        for label,ok,detail in checks: print(f"{'OK' if ok else 'INFO' if label in {'llama.cpp','Remote credentials'} else 'NEEDS ATTENTION'}  {label}: {detail}")
-        return 0 if all(ok or label=="llama.cpp" for label,ok,_ in checks) else 1
+        if settings.local_backend == "llama-server":
+            runtime_check=("llama-server endpoint (not contacted)",True,settings.llama_server_url)
+        else:
+            runtime_check=("llama.cpp executable",bool(shutil.which(settings.llama_cli)) or Path(settings.llama_cli).is_file(),settings.llama_cli)
+        checks = [("Python",sys.version_info >= (3,10),sys.version.split()[0]),("Database directory",parent.exists() and parent.is_dir(),str(parent)),("Local model",not settings.local_model_path or settings.local_model_path.is_file(),str(settings.local_model_path or "not configured")),runtime_check,("Remote configuration",remote_ready if remote_selected else True,"ready" if remote_ready else "incomplete/unsafe; optional unless AYU_MODE=remote")]
+        for label,ok,detail in checks: print(f"{'INFO' if label.startswith('llama-server endpoint') or label=='llama.cpp executable' else 'OK' if ok else 'NEEDS ATTENTION'}  {label}: {detail}")
+        return 0 if all(ok or label in {"llama.cpp executable","llama-server endpoint (not contacted)"} for label,ok,_ in checks) else 1
     if cmd == "status":
-        messages,memories=store.counts(); print(f"Ayu AI {__version__}\nMode: {settings.mode}\nDatabase: {settings.database_path}\nPersistent memory enabled: {settings.memory_enabled}\nConfigured local model: {settings.local_model_path or 'none'}\nRemote provider: {settings.remote_provider}\nRemote model configured: {'yes' if settings.model else 'no'}\nSelected AI credential: {'present (value hidden)' if settings.api_key else 'not configured'}\nNewsAPI enabled: {settings.newsapi_enabled}\nNewsAPI credential: {'present (value hidden)' if settings.newsapi_api_key else 'not configured'}\nMessages: {messages}\nMemories: {memories}\nNo telemetry is sent."); return 0
+        messages,memories=store.counts(); print(f"Ayu AI {__version__}\nMode: {settings.mode}\nDatabase: {settings.database_path}\nPersistent memory enabled: {settings.memory_enabled}\nLocal backend: {settings.local_backend}\nLocal server URL: {settings.llama_server_url if settings.local_backend == 'llama-server' else 'not selected'}\nConfigured local model: {settings.local_model_path or 'none'}\nRemote provider: {settings.remote_provider}\nRemote model configured: {'yes' if settings.model else 'no'}\nSelected AI credential: {'present (value hidden)' if settings.api_key else 'not configured'}\nNewsAPI enabled: {settings.newsapi_enabled}\nNewsAPI credential: {'present (value hidden)' if settings.newsapi_api_key else 'not configured'}\nMessages: {messages}\nMemories: {memories}\nNo telemetry is sent."); return 0
     if cmd == "chat": return run_chat(store,settings,args)
     if cmd == "models":
         if args.models_command == "list":
@@ -402,10 +474,27 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.models_command == "info":
             p=settings.local_model_path
-            print(f"Local backend: llama.cpp CLI\nRuntime: {settings.llama_cli}\nLocal model: {p or 'not configured'}\nModel present: {bool(p and p.is_file())}\nRemote provider: {settings.remote_provider}\nRemote mode configured: {bool(settings.api_key and settings.model)}\nRemote calls are never used in local mode."); return 0
+            if settings.local_backend == "llama-server":
+                runtime=f"llama-server at {settings.llama_server_url} (loopback only)"
+            else:
+                runtime=f"llama.cpp CLI: {settings.llama_cli}"
+            print(f"Local backend: {settings.local_backend}\nRuntime: {runtime}\nLocal model: {p or 'not configured'}\nModel file present: {bool(p and p.is_file())}\nRemote provider: {settings.remote_provider}\nRemote mode configured: {bool(settings.api_key and settings.model)}\nRemote calls are never used in local mode."); return 0
         try:
-            p,exe=LlamaCppProvider(settings).validate()
-            print(f"Verified local GGUF: {p}\nSize: {p.stat().st_size:,} bytes\nRuntime: {exe}\nNo license is inferred; review the model source's license separately."); return 0
+            provider=build_local_provider(settings)
+            if isinstance(provider,LlamaServerProvider):
+                model_id=provider.validate()
+                runtime=provider.last_runtime_info
+                detail=f"Local llama-server is ready; model `{model_id}`, build {runtime.get('build_info', 'not reported')}, effective context {runtime.get('context_size', 'unknown')} tokens, and loaded model path matches AYU_LOCAL_MODEL."
+            else:
+                model,exe=provider.validate()
+                detail=f"GGUF file and executable preflight passed: {model} ({model.stat().st_size:,} bytes); runtime {exe}."
+            if args.infer:
+                answer=provider.complete([{"role":"system","content":"This is a local inference smoke test. Respond briefly."},{"role":"user","content":"Return the text AYU_LOCAL_INFERENCE_OK."}])
+                selected=(f"llama-server model {provider.last_runtime_info.get('model_id')} build {provider.last_runtime_info.get('build_info')}" if isinstance(provider,LlamaServerProvider) else f"llama-cli runtime {exe}")
+                print(f"Local inference request succeeded; a non-empty response was received from {selected}.\n{answer}")
+            else:
+                print(f"Preflight passed; this did not run model generation. {detail}\nRun `ayu models verify --infer` to test actual inference.")
+            return 0
         except ProviderError as exc: print(f"Model verification failed: {exc}",file=sys.stderr); return 1
     if cmd == "memory":
         subcmd=args.memory_command
@@ -496,7 +585,7 @@ def main(argv: list[str] | None = None) -> int:
         print(label+"." if ok else "Task not found."); return 0 if ok else 1
     if cmd == "config":
         if args.config_command=="show":
-            print(f"AYU_MODE={settings.mode}\nAYU_MEMORY_ENABLED={str(settings.memory_enabled).lower()}\nAYU_DATABASE={settings.database_path}\nAYU_LOCAL_MODEL={settings.local_model_path or ''}\nAYU_LLAMA_CLI={settings.llama_cli}\nAYU_PROVIDER={settings.remote_provider}\nAYU_BASE_URL={settings.base_url}\nAYU_MODEL={settings.model or ''}\nSelected AI credential={'<redacted: set>' if settings.api_key else '<not set>'}\nNEWSAPI_API_KEY={'<redacted: set>' if settings.newsapi_api_key else '<not set>'}\nAYU_NEWSAPI_ENABLED={str(settings.newsapi_enabled).lower()}"); return 0
+            print(f"AYU_MODE={settings.mode}\nAYU_MEMORY_ENABLED={str(settings.memory_enabled).lower()}\nAYU_DATABASE={settings.database_path}\nAYU_LOCAL_BACKEND={settings.local_backend}\nAYU_LOCAL_MODEL={settings.local_model_path or ''}\nAYU_LOCAL_MODEL_ID={settings.local_model_id or ''}\nAYU_LLAMA_CLI={settings.llama_cli}\nAYU_LLAMA_SERVER_URL={settings.llama_server_url}\nAYU_LOCAL_MAX_INPUT_CHARS={settings.local_max_input_chars}\nAYU_PROVIDER={settings.remote_provider}\nAYU_BASE_URL={settings.base_url}\nAYU_MODEL={settings.model or ''}\nSelected AI credential={'<redacted: set>' if settings.api_key else '<not set>'}\nNEWSAPI_API_KEY={'<redacted: set>' if settings.newsapi_api_key else '<not set>'}\nAYU_NEWSAPI_ENABLED={str(settings.newsapi_enabled).lower()}"); return 0
         if settings.mode=="remote":
             problems=[]
             key_name={"openai":"OPENAI_API_KEY","anthropic":"ANTHROPIC_API_KEY"}.get(settings.remote_provider,"AYU_API_KEY")

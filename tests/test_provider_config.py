@@ -19,6 +19,26 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(settings.model, "from-environment")
             self.assertEqual(settings.max_output_tokens, 500)
 
+    def test_local_server_backend_settings_are_explicit_and_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            values = {"AYU_DATABASE": str(Path(tmp) / "db.sqlite"),
+                      "AYU_LOCAL_BACKEND": "llama-server",
+                      "AYU_LLAMA_SERVER_URL": "http://127.0.0.1:9931",
+                      "AYU_LOCAL_MODEL_ID": "model-alias",
+                      "AYU_LOCAL_MAX_INPUT_CHARS": "12000"}
+            with patch.dict(os.environ, values, clear=True):
+                settings = Settings.load(Path("/nonexistent/.env"))
+            self.assertEqual(settings.local_backend, "llama-server")
+            self.assertEqual(settings.llama_server_url, "http://127.0.0.1:9931")
+            self.assertEqual(settings.local_model_id, "model-alias")
+            self.assertEqual(settings.local_max_input_chars, 12000)
+            with patch.dict(os.environ, {**values, "AYU_LOCAL_BACKEND": "remote"}, clear=True):
+                with self.assertRaisesRegex(ValueError, "AYU_LOCAL_BACKEND"):
+                    Settings.load(Path("/nonexistent/.env"))
+            with patch.dict(os.environ, {**values, "AYU_LOCAL_MAX_INPUT_CHARS": "0"}, clear=True):
+                with self.assertRaisesRegex(ValueError, "AYU_LOCAL_MAX_INPUT_CHARS"):
+                    Settings.load(Path("/nonexistent/.env"))
+
     def test_invalid_remote_url_is_deferred_until_remote_use(self):
         with patch.dict(os.environ, {"AYU_BASE_URL": "file:///tmp", "AYU_DATABASE": "/tmp/ayu-test.sqlite"}, clear=True):
             settings = Settings.load(Path("/nonexistent/.env"))
