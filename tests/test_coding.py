@@ -241,7 +241,7 @@ class CodingWorkflowTests(unittest.TestCase):
             test_evidence = next(json.loads(event["payload_json"]) for event in events if event["event_type"] == "test_result")
             self.assertEqual(len(test_evidence["stderr_capture_sha256"]), 64)
             self.assertIn("OK", test_evidence["stderr_excerpt"])
-            subprocess.run(["git", "-C", str(worktree), "worktree", "remove", "--force", str(worktree)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)], check=True, capture_output=True)
             subprocess.run(["git", "-C", str(root), "branch", "-D", result["branch"]], check=True, capture_output=True)
 
     def test_single_correction_is_bounded_and_retested(self):
@@ -267,7 +267,7 @@ class CodingWorkflowTests(unittest.TestCase):
             types = [event["event_type"] for event in store.list_agent_events(result["run_id"])]
             self.assertEqual(types.count("correction"), 1)
             worktree = Path(result["worktree"])
-            subprocess.run(["git", "-C", str(worktree), "worktree", "remove", "--force", str(worktree)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)], check=True, capture_output=True)
             subprocess.run(["git", "-C", str(root), "branch", "-D", result["branch"]], check=True, capture_output=True)
 
     def test_dirty_source_repository_is_refused_before_run_record(self):
