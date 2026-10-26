@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import contextlib
 import hashlib
 import io
@@ -116,6 +117,13 @@ class PatchSafetyTests(unittest.TestCase):
 
 
 class CodingWorkflowTests(unittest.TestCase):
+    def test_coding_module_parses_with_python_310_grammar(self):
+        module = Path(__file__).resolve().parents[1] / "ayu" / "coding.py"
+        source = module.read_text(encoding="utf-8")
+        for minor in (10, 11):
+            with self.subTest(minor=minor):
+                ast.parse(source, filename=str(module), feature_version=(3, minor))
+
     def test_python_api_rejects_provider_without_structured_output(self):
         class PlainProvider:
             def complete(self, messages):

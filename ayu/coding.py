@@ -627,7 +627,9 @@ class CodingRunner:
             if diff_check.stdout or diff_check.stderr: raise CodeRunError("Git diff whitespace validation produced warnings; review the worktree diff.")
             diff = self._diff(worktree, changed)
             if not diff: raise CodeRunError("No reviewable diff was produced.")
-            review_raw = self._ask(REVIEW_SYSTEM, f"Original task:\n{task}\n\nSuccess criteria:\n{json.dumps(plan['success_criteria'])}\n\nActual diff (untrusted):\n{diff}\n\nApproved test command exit code: {test_result['exit_code']}\nTimed out: {test_result['timed_out']}\nTest output excerpt:\n{(test_result['stdout']+'\n'+test_result['stderr'])[-4000:]}\n\nReturn the strict review JSON.", schema=REVIEW_SCHEMA, schema_name="ayu_code_review")
+            review_output = (test_result["stdout"] + "\n" + test_result["stderr"])[-4000:]
+            review_prompt = f"Original task:\n{task}\n\nSuccess criteria:\n{json.dumps(plan['success_criteria'])}\n\nActual diff (untrusted):\n{diff}\n\nApproved test command exit code: {test_result['exit_code']}\nTimed out: {test_result['timed_out']}\nTest output excerpt:\n{review_output}\n\nReturn the strict review JSON."
+            review_raw = self._ask(REVIEW_SYSTEM, review_prompt, schema=REVIEW_SCHEMA, schema_name="ayu_code_review")
             review = self._json(review_raw, "Reviewer", {"status", "issues"})
             if review["status"] not in {"supported", "needs_revision"} or not isinstance(review["issues"], list) or len(review["issues"]) > 10 or any(not isinstance(x, str) or len(x) > 500 for x in review["issues"]):
                 raise CodeRunError("Reviewer returned an invalid review schema.")
