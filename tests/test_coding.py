@@ -84,6 +84,18 @@ class PatchSafetyTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "x = 3\ny = 4\n")
             self.assertEqual(len(changes), 1)
 
+    def test_crlf_file_accepts_lf_model_context_and_preserves_crlf(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); target = root / "a.py"
+            original = b"x = 1\r\ny = 2\r\n"
+            target.write_bytes(original)
+            digest = hashlib.sha256(original).hexdigest()
+            changes = apply_edits(root, [
+                {"path": "a.py", "old_text": "x = 1\ny = 2", "new_text": "x = 3\ny = 4"}
+            ], {"a.py": digest})
+            self.assertEqual(target.read_bytes(), b"x = 3\r\ny = 4\r\n")
+            self.assertEqual(changes[0]["path"], "a.py")
+
     def test_overlapping_same_file_contexts_are_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); target = root / "a.py"
@@ -95,6 +107,19 @@ class PatchSafetyTests(unittest.TestCase):
                     {"path": "a.py", "old_text": "y = 2", "new_text": "y = 4"},
                 ], {"a.py": digest})
             self.assertEqual(target.read_text(encoding="utf-8"), "x = 1\ny = 2\n")
+
+    def test_overlapping_crlf_contexts_are_rejected_before_writing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); target = root / "a.py"
+            original = b"x = 1\r\ny = 2\r\n"
+            target.write_bytes(original)
+            digest = hashlib.sha256(original).hexdigest()
+            with self.assertRaisesRegex(CodeRunError, "overlap"):
+                apply_edits(root, [
+                    {"path": "a.py", "old_text": "x = 1\ny = 2", "new_text": "z = 3"},
+                    {"path": "a.py", "old_text": "y = 2", "new_text": "y = 4"},
+                ], {"a.py": digest})
+            self.assertEqual(target.read_bytes(), original)
 
     def test_unsupported_test_command_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:

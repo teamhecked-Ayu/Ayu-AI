@@ -192,8 +192,18 @@ def apply_edits(root: Path, edits: Any, observed_hashes: dict[str, str]) -> list
                 text = original.decode("utf-8")
             except UnicodeError as exc:
                 raise CodeRunError("Only UTF-8 text files can be edited.") from exc
+            crlf_count = text.count("\r\n")
+            bare_lf_count = text.count("\n") - crlf_count
+            if "\r" in text.replace("\r\n", "") or (crlf_count and bare_lf_count):
+                raise CodeRunError("Mixed or bare-CR line endings are not supported for safe exact-context edits.")
+            newline = "\r\n" if crlf_count else "\n"
+            text = text.replace("\r\n", "\n")
             spans = []
             for old_text, new_text in patches:
+                old_text = old_text.replace("\r\n", "\n")
+                new_text = new_text.replace("\r\n", "\n")
+                if "\r" in old_text or "\r" in new_text:
+                    raise CodeRunError("Edit snippets may use LF or CRLF, but not bare carriage returns.")
                 if text.count(old_text) != 1:
                     raise CodeRunError(f"Exact edit context must occur exactly once in {rel}; ambiguous/stale patch rejected.")
                 start = text.find(old_text)
@@ -206,7 +216,7 @@ def apply_edits(root: Path, edits: Any, observed_hashes: dict[str, str]) -> list
                 updated_text = updated_text[:start] + replacement + updated_text[end:]
             if not updated_text.strip():
                 raise CodeRunError("Refusing an edit that would leave an existing source file empty.")
-            updated = updated_text.encode("utf-8")
+            updated = updated_text.replace("\n", newline).encode("utf-8")
             mode = path.stat().st_mode & 0o777
         else:
             if path.exists():
@@ -623,7 +633,7 @@ class CodingRunner:
                 if rel not in changed: unexpected.append(rel)
             if unexpected:
                 raise CodeRunError("Test execution changed files outside the model patch set; run was not marked complete. Unexpected paths: " + ", ".join(unexpected[:10]))
-            diff_check = self._git(worktree, "diff", "--check", "--no-ext-diff", "--no-textconv", timeout=10)
+            diff_check = self._git(worktree, "-c", "core.whitespace=cr-at-eol", "diff", "--check", "--no-ext-diff", "--no-textconv", timeout=10)
             if diff_check.stdout or diff_check.stderr: raise CodeRunError("Git diff whitespace validation produced warnings; review the worktree diff.")
             diff = self._diff(worktree, changed)
             if not diff: raise CodeRunError("No reviewable diff was produced.")
