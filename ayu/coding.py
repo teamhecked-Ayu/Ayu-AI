@@ -1,6 +1,7 @@
 """Bounded local coding workflow using isolated Git worktrees and exact-context edits.
 
-Command execution is opt-in and uses the current OS account; this is not a security sandbox.
+Verification requires the fail-closed Docker sandbox backend. The Git worktree
+is not an OS security boundary; see docs/SECURITY_THREAT_MODEL.md.
 """
 from __future__ import annotations
 
@@ -8,11 +9,8 @@ import hashlib
 import json
 import os
 import re
-import signal
 import subprocess
-import sys
 import tempfile
-import threading
 import time
 import uuid
 from pathlib import Path, PureWindowsPath
@@ -20,10 +18,10 @@ from typing import Any
 
 from .store import Store
 from .tools import DENIED_DIRS, DENIED_NAMES, DENIED_SUFFIXES, TEXT_SUFFIXES, ToolError, ToolRegistry
+from .sandbox import DockerSandboxRunner, SandboxError
 
 MAX_JSON_CHARS = 32_000
 MAX_DIFF_CHARS = 8_000
-MAX_OUTPUT_BYTES = 256 * 1024
 MAX_EDIT_CHARS = 16_000
 
 class CodeRunError(RuntimeError):
@@ -127,34 +125,16 @@ def _target(root: Path, relative: str, *, may_create: bool) -> Path:
 
 def _safe_test_rel(raw: Any) -> str:
     """Validate a relative test path; unlike an edit path, a safe directory need not have a suffix."""
-    if not isinstance(raw, str) or not raw or len(raw) > 512 or "\\" in raw or PureWindowsPath(raw).is_absolute() or PureWindowsPath(raw).drive:
+    if (not isinstance(raw, str) or not raw or len(raw) > 512 or "\x00" in raw
+            or "\\" in raw or PureWindowsPath(raw).is_absolute() or PureWindowsPath(raw).drive):
         raise CodeRunError("Test paths must be short, workspace-relative POSIX paths.")
     relative = Path(raw)
-    if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} or part.startswith(".") for part in relative.parts):
+    if relative.is_absolute() or not relative.parts or any(
+            part in {"", ".", ".."} or part.startswith((".", "-")) for part in relative.parts):
         raise CodeRunError("Hidden, absolute, and parent-traversal test paths are not allowed.")
     if any(part.casefold() in DENIED_DIRS or part.casefold() in DENIED_NAMES for part in relative.parts):
         raise CodeRunError("Test paths may not enter blocked environment, secret, build, or dependency paths.")
     return relative.as_posix()
-
-
-def _test_target(root: Path, raw: Any) -> Path:
-    rel = _safe_test_rel(raw)
-    relative = Path(rel)
-    path = root.joinpath(*relative.parts)
-    current = root
-    for part in relative.parts:
-        current = current / part
-        if current.is_symlink():
-            raise CodeRunError("Symbolic links are not allowed in test paths.")
-    try:
-        resolved = path.resolve(strict=True)
-    except OSError as exc:
-        raise CodeRunError(f"Test path does not exist: {relative.as_posix()}") from exc
-    if not resolved.is_relative_to(root) or not (resolved.is_file() or resolved.is_dir()):
-        raise CodeRunError("Test target must be a regular file or directory inside the workspace.")
-    if resolved.is_file() and (resolved.name.casefold() in DENIED_NAMES or resolved.suffix.casefold() in DENIED_SUFFIXES or resolved.suffix.casefold() not in TEXT_SUFFIXES):
-        raise CodeRunError("Test files must use an allowed text-source type.")
-    return resolved
 
 
 def apply_edits(root: Path, edits: Any, observed_hashes: dict[str, str]) -> list[dict[str, str]]:
@@ -273,109 +253,15 @@ def apply_edits(root: Path, edits: Any, observed_hashes: dict[str, str]) -> list
             except OSError: pass
 
 
-def _drain(pipe, cap: int, target: bytearray, truncated: list[bool]) -> None:
-    while True:
-        chunk = pipe.read(8192)
-        if not chunk: return
-        remaining = cap - len(target)
-        if remaining > 0: target.extend(chunk[:remaining])
-        if len(chunk) > remaining: truncated[0] = True
-
-
-def _stop_process(proc: subprocess.Popen) -> None:
-    if os.name == "nt":
-        try: proc.terminate()
-        except OSError: pass
-        try: proc.wait(timeout=0.5)
-        except subprocess.TimeoutExpired:
-            try: proc.kill()
-            except OSError: pass
-        return
-    try: os.killpg(proc.pid, signal.SIGTERM)
-    except (OSError, ProcessLookupError): pass
-    try: proc.wait(timeout=0.5)
-    except subprocess.TimeoutExpired: pass
-    # Kill remaining descendants even if the group leader exited on SIGTERM.
-    try: os.killpg(proc.pid, signal.SIGKILL)
-    except (OSError, ProcessLookupError): pass
-    try: proc.wait(timeout=5)
-    except subprocess.TimeoutExpired: pass
-
-
-def run_approved_tests(worktree: Path, suite: str, paths: list[str], timeout: int, private_home: Path,
-                       *, allow_host_execution: bool = False) -> dict[str, Any]:
-    """Execute only fixed Python test commands, after explicit host-execution consent."""
-    if not allow_host_execution:
-        raise CodeRunError("Host test execution requires explicit allow_host_execution=True consent; no sandbox is provided.")
-    try:
-        worktree = worktree.resolve(strict=True)
-    except OSError as exc:
-        raise CodeRunError("Test workspace does not exist.") from exc
-    if not worktree.is_dir():
-        raise CodeRunError("Test workspace must be a directory.")
-    if suite not in {"pytest", "unittest", "compileall"}:
-        raise CodeRunError("Supported test suites are pytest, unittest, and compileall.")
-    if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 600:
-        raise CodeRunError("Test timeout must be between 1 and 600 seconds.")
-    checked: list[str] = []
-    for raw in paths:
-        target = _test_target(worktree, raw)
-        checked.append(target.relative_to(worktree).as_posix())
-    if suite == "unittest" and len(checked) > 1:
-        raise CodeRunError("unittest accepts at most one discovery directory.")
-    if suite == "unittest" and checked and not (worktree / checked[0]).is_dir():
-        raise CodeRunError("unittest --test-path must name a discovery directory.")
-    if suite == "unittest" and not checked:
-        _test_target(worktree, "tests")
-    if suite == "pytest":
-        cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *checked]
-    elif suite == "unittest":
-        cmd = [sys.executable, "-m", "unittest", "discover", "-s", checked[0] if checked else "tests", "-v"]
-    else:
-        cmd = [sys.executable, "-m", "compileall", "-q", *(checked or ["."])]
-    private_home.mkdir(parents=True, exist_ok=True, mode=0o700)
-    env = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT", "WINDIR", "PATHEXT", "COMSPEC", "VIRTUAL_ENV", "LANG", "LC_ALL") if key in os.environ}
-    env.update({"HOME": str(private_home), "USERPROFILE": str(private_home),
-                "TMPDIR": str(private_home), "TEMP": str(private_home), "TMP": str(private_home),
-                "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPYCACHEPREFIX": str(private_home / "pycache"),
-                "GIT_TERMINAL_PROMPT": "0"})
-    stdout, stderr = bytearray(), bytearray(); out_trunc, err_trunc = [False], [False]
-    started = time.monotonic()
-    try:
-        proc = subprocess.Popen(cmd, cwd=worktree, env=env, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
-                                start_new_session=(os.name != "nt"))
-    except OSError as exc:
-        return {"command": cmd, "exit_code": None, "timed_out": False, "duration_seconds": round(time.monotonic()-started, 3),
-                "stdout": "", "stderr": f"Could not start approved test command ({type(exc).__name__}); details suppressed.", "infrastructure_error": True}
-    threads = [threading.Thread(target=_drain, args=(proc.stdout, MAX_OUTPUT_BYTES, stdout, out_trunc), daemon=True),
-               threading.Thread(target=_drain, args=(proc.stderr, MAX_OUTPUT_BYTES, stderr, err_trunc), daemon=True)]
-    for thread in threads: thread.start()
-    timed_out = False
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True; _stop_process(proc)
-    except KeyboardInterrupt:
-        _stop_process(proc); raise
-    finally:
-        for thread in threads: thread.join(timeout=2)
-    def decode(data: bytearray, truncated: bool) -> str:
-        text = bytes(data).decode("utf-8", errors="replace")
-        return text + ("\n[output truncated at 256 KiB]" if truncated else "")
-    return {"command": cmd, "exit_code": proc.returncode, "timed_out": timed_out,
-            "duration_seconds": round(time.monotonic()-started, 3), "stdout": decode(stdout, out_trunc[0]),
-            "stderr": decode(stderr, err_trunc[0]), "infrastructure_error": False}
-
-
 class CodingRunner:
     """One plan/edit/test/review workflow, one bounded correction, no shell from the model."""
-    def __init__(self, provider: Any, store: Store, *, mode: str = "local"):
+    def __init__(self, provider: Any, store: Store, *, mode: str = "local", sandbox_runner: Any | None = None):
         if mode != "local":
             raise CodeRunError("The coding workflow currently permits local inference only; no source/test data is sent remotely.")
         if not callable(getattr(provider, "complete_structured", None)):
             raise CodeRunError("Coding requires a provider with strict JSON Schema output; use the llama-server backend.")
         self.provider, self.store, self.mode = provider, store, mode
+        self.sandbox = sandbox_runner or DockerSandboxRunner.from_environment()
         self.calls = 0
 
     def _ask(self, system: str, user: str, *, schema: dict[str, Any], schema_name: str) -> str:
@@ -542,15 +428,19 @@ class CodingRunner:
         return diff
 
     def run(self, task: str, workspace: Path, *, suite: str, test_paths: list[str] | None = None,
-            timeout: int = 120, allow_host_tests: bool = False) -> dict[str, Any]:
+            timeout: int = 120) -> dict[str, Any]:
         task = task.strip() if isinstance(task, str) else ""
         if not 1 <= len(task) <= 2000: raise CodeRunError("Coding task must contain 1..2000 characters.")
-        if not allow_host_tests: raise CodeRunError("Test execution is disabled by default. Re-run with --allow-host-tests only after reviewing that project tests execute with your OS account; Ayu does not provide an OS sandbox.")
         if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 600:
             raise CodeRunError("Test timeout must be between 1 and 600 seconds.")
         if test_paths is not None and (not isinstance(test_paths, list) or len(test_paths) > 5):
             raise CodeRunError("Provide at most five explicit test paths.")
         for item in test_paths or []: _safe_test_rel(item)
+        if suite not in {"pytest", "unittest", "compileall"}: raise CodeRunError("Unsupported test suite.")
+        try:
+            sandbox_policy = self.sandbox.preflight()
+        except SandboxError as exc:
+            raise CodeRunError(f"Required execution sandbox is unavailable: {exc}") from None
         workspace = workspace.expanduser().resolve(strict=True)
         if not workspace.is_dir(): raise CodeRunError("Workspace must be an existing directory.")
         top = Path(self._git(workspace, "rev-parse", "--show-toplevel").stdout.strip()).resolve(strict=True)
@@ -560,7 +450,6 @@ class CodingRunner:
         if status: raise CodeRunError("Refusing a dirty repository: commit/stash your changes or use a clean task-specific clone. Ayu will not overwrite or hide existing user changes.")
         head = self._git(workspace, "rev-parse", "HEAD").stdout.strip()
         if not re.fullmatch(r"[0-9a-fA-F]{40,64}", head): raise CodeRunError("Could not verify the base Git commit.")
-        if suite not in {"pytest", "unittest", "compileall"}: raise CodeRunError("Unsupported test suite.")
         run_id = uuid.uuid4().hex
         branch = "ayu/task/" + run_id[:16]
         run_root = Path(tempfile.mkdtemp(prefix=f"ayu-code-{run_id[:8]}-"))
@@ -574,11 +463,12 @@ class CodingRunner:
             nonlocal seq
             self.store.record_agent_event(run_id, seq, "coding", kind, data); seq += 1
         try:
+            event("sandbox_policy", sandbox_policy)
             hooks = run_root / "empty-hooks"
             hooks.mkdir(mode=0o700)
             event("worktree_preparing", {"workspace": str(workspace), "worktree": str(worktree), "branch": branch, "base_commit": head})
             self._git(workspace, "-c", f"core.hooksPath={hooks}", "worktree", "add", "-b", branch, str(worktree), head, timeout=30)
-            event("worktree_created", {"workspace": str(workspace), "worktree": str(worktree), "branch": branch, "base_commit": head, "host_tests_explicitly_allowed": True})
+            event("worktree_created", {"workspace": str(workspace), "worktree": str(worktree), "branch": branch, "base_commit": head, "sandbox_required": True, "sandbox_policy_version": sandbox_policy.get("policy_version")})
             inventory = self._inventory(worktree)
             plan_raw = self._ask(PLAN_SYSTEM, "Task (untrusted):\n"+task+"\n\nTracked text-file inventory (paths only):\n"+"\n".join(inventory)+"\n\nCreate a concise plan and list relevant files. For behavior changes, include implementation source; do not select tests alone if relevant source is available.", schema=_planner_schema(inventory), schema_name="ayu_code_plan")
             plan = self._json(plan_raw, "Planner", {"files_to_read", "success_criteria", "risk_notes"})
@@ -609,13 +499,16 @@ class CodingRunner:
             changes = apply_edits(worktree, edits, hashes)
             changed = [item["path"] for item in changes]
             event("files_edited", {"summary": summary, "changes": changes})
-            test_result = run_approved_tests(worktree, suite, test_paths or [], timeout, private_home, allow_host_execution=True)
+            test_result = self.sandbox.run_tests(
+                worktree, suite, test_paths or [], timeout, run_id=run_id,
+                on_start=lambda details: event("sandbox_container_starting", details),
+            )
             event("test_result", self._test_evidence(test_result))
-            if test_result["exit_code"] != 0 or test_result["timed_out"] or test_result["infrastructure_error"]:
-                if test_result["infrastructure_error"] or test_result["timed_out"]:
-                    raise CodeRunError("Approved test command did not complete successfully; no model-generated correction was attempted for infrastructure/timeout failure.")
+            if test_result["exit_code"] != 0 or test_result["timed_out"] or test_result["infrastructure_error"] or test_result.get("cleanup_confirmed") is False:
+                if test_result["infrastructure_error"] or test_result["timed_out"] or test_result.get("cleanup_confirmed") is False:
+                    raise CodeRunError("Sandbox test command did not complete with verified cleanup; no model-generated correction was attempted for infrastructure, timeout, or cleanup failure.")
                 current_context, current_hashes = self._context(tools, changed)
-                failure = (test_result["stdout"] + "\n" + test_result["stderr"])[-8000:]
+                failure = sanitize_test_output(test_result["stdout"] + "\n" + test_result["stderr"], 8000)
                 correction_raw = self._ask(REPAIR_SYSTEM, f"Task (untrusted):\n{task}\n\nCurrent source files:\n{current_context}\n\nApproved test command result (exit {test_result['exit_code']}):\n{failure}\n\nOnly edit existing implementation files from this exact allowlist: {json.dumps(editable)}. Do not create files or edit tests. Use non-empty exact old_text. Make one bounded correction; do not weaken tests.", schema=_edit_schema(editable), schema_name="ayu_code_correction")
                 correction_summary, correction = self._parse_edits(correction_raw)
                 if any(edit["path"] not in editable or not edit["old_text"] for edit in correction):
@@ -623,8 +516,13 @@ class CodingRunner:
                 correction_changes = apply_edits(worktree, correction, current_hashes)
                 changed = list(dict.fromkeys(changed + [item["path"] for item in correction_changes]))
                 event("correction", {"summary": correction_summary, "changes": correction_changes})
-                test_result = run_approved_tests(worktree, suite, test_paths or [], timeout, private_home, allow_host_execution=True)
+                test_result = self.sandbox.run_tests(
+                    worktree, suite, test_paths or [], timeout, run_id=run_id,
+                    on_start=lambda details: event("sandbox_container_starting", details),
+                )
                 event("test_result", self._test_evidence(test_result))
+                if test_result["infrastructure_error"] or test_result["timed_out"] or test_result.get("cleanup_confirmed") is False:
+                    raise CodeRunError("Correction test command did not complete with verified sandbox cleanup; no further correction was attempted.")
             status_output = self._git(worktree, "status", "--porcelain=v1", "-z", "--untracked-files=all").stdout
             unexpected = []
             for record in status_output.split("\0"):
@@ -637,14 +535,17 @@ class CodingRunner:
             if diff_check.stdout or diff_check.stderr: raise CodeRunError("Git diff whitespace validation produced warnings; review the worktree diff.")
             diff = self._diff(worktree, changed)
             if not diff: raise CodeRunError("No reviewable diff was produced.")
-            review_output = (test_result["stdout"] + "\n" + test_result["stderr"])[-4000:]
+            review_output = sanitize_test_output(test_result["stdout"] + "\n" + test_result["stderr"], 4000)
             review_prompt = f"Original task:\n{task}\n\nSuccess criteria:\n{json.dumps(plan['success_criteria'])}\n\nActual diff (untrusted):\n{diff}\n\nApproved test command exit code: {test_result['exit_code']}\nTimed out: {test_result['timed_out']}\nTest output excerpt:\n{review_output}\n\nReturn the strict review JSON."
             review_raw = self._ask(REVIEW_SYSTEM, review_prompt, schema=REVIEW_SCHEMA, schema_name="ayu_code_review")
             review = self._json(review_raw, "Reviewer", {"status", "issues"})
             if review["status"] not in {"supported", "needs_revision"} or not isinstance(review["issues"], list) or len(review["issues"]) > 10 or any(not isinstance(x, str) or len(x) > 500 for x in review["issues"]):
                 raise CodeRunError("Reviewer returned an invalid review schema.")
             event("review", review)
-            final_status = "completed" if test_result["exit_code"] == 0 and not test_result["timed_out"] and review["status"] == "supported" else "failed"
+            final_status = "completed" if (test_result["exit_code"] == 0 and not test_result["timed_out"]
+                                             and not test_result["infrastructure_error"]
+                                             and test_result.get("cleanup_confirmed") is not False
+                                             and review["status"] == "supported") else "failed"
             event("final_diff", {"changed_files": changed, "diff": diff, "test_exit_code": test_result["exit_code"], "review_status": review["status"]})
             self.store.finish_agent_run(run_id, final_status, "" if final_status == "completed" else "Tests or model review did not satisfy completion criteria.")
             display_test = dict(test_result)
@@ -655,7 +556,7 @@ class CodingRunner:
             return {"run_id": run_id, "status": final_status, "branch": branch, "base_commit": head,
                     "worktree": str(worktree), "changed_files": changed, "plan": plan, "test": display_test,
                     "review": review, "diff": diff,
-                    "note": "Changes remain uncommitted in an isolated Git worktree. Tests ran with the current OS account after explicit --allow-host-tests; this is not an OS sandbox. No remote model, package install, network request, commit, or push was used."}
+                    "note": "Changes remain uncommitted in an isolated Git worktree. Tests ran in a digest-pinned Docker container against a disposable workspace snapshot with network disabled; the Git worktree itself is not the security boundary. No host test fallback, remote model, package install, commit, or push was used."}
         except KeyboardInterrupt:
             event("cancelled", {"worktree": str(worktree), "partial_changes_preserved": True})
             self.store.finish_agent_run(run_id, "cancelled", "user interrupted the code run")

@@ -98,17 +98,21 @@ def build_parser() -> argparse.ArgumentParser:
     agent_run.add_argument("--allow-remote-context", action="store_true", help="Explicitly allow selected local excerpts to be sent to the configured remote provider")
     agent_inspect = ag.add_parser("inspect", help="Inspect a persisted agent run and its local audit events")
     agent_inspect.add_argument("run_id")
-    code = sub.add_parser("code", help="Run a bounded local-model coding task in an isolated Git worktree")
+    code = sub.add_parser("code", help="Run a bounded local-model coding task with sandboxed verification")
     code_sub = code.add_subparsers(dest="code_command", required=True)
-    code_run = code_sub.add_parser("run", help="Plan, edit, test, review, and preserve a local diff")
+    code_run = code_sub.add_parser("run", help="Plan, edit, test in a required local Docker sandbox, review, and preserve a local diff")
     code_run.add_argument("task", nargs="+", help="Requested code outcome; never interpreted as a shell command")
     code_run.add_argument("--workspace", type=Path, required=True, help="Clean Git repository root; changes go only to a separate temporary worktree")
     code_run.add_argument("--test-suite", choices=("pytest", "unittest", "compileall"), required=True, help="Fixed, allow-listed Python verification command")
     code_run.add_argument("--test-path", action="append", default=[], help="Optional workspace-relative file/directory for pytest or compileall; unittest accepts one discovery directory; may be repeated")
-    code_run.add_argument("--timeout", type=int, default=120, help="Per-test-process timeout in seconds (1..600)")
-    code_run.add_argument("--allow-host-tests", action="store_true", help="Explicitly allow repository tests to execute with this OS account; Ayu does not provide an OS sandbox")
+    code_run.add_argument("--timeout", type=int, default=120, help="Per-sandbox test timeout in seconds (1..600)")
     code_inspect = code_sub.add_parser("inspect", help="Inspect the persistent status, diff, and verification evidence for a coding run")
     code_inspect.add_argument("run_id")
+    sandbox = sub.add_parser("sandbox", help="Inspect the local coding-test isolation backend")
+    sandbox_sub = sandbox.add_subparsers(dest="sandbox_command", required=True)
+    sandbox_sub.add_parser("status", help="Check local Docker daemon and digest-pinned sandbox image; runs no user code")
+    sandbox_cleanup = sandbox_sub.add_parser("cleanup", help="Force-remove only containers recorded for one interrupted Ayu coding run")
+    sandbox_cleanup.add_argument("run_id")
     news = sub.add_parser("news", help="Optional NewsAPI.org metadata search; no AI provider is called")
     news_sub = news.add_subparsers(dest="news_command", required=True)
     news_search = news_sub.add_parser("search", help="Search article metadata with NewsAPI.org")
@@ -382,6 +386,7 @@ def run_agent(store: Store, settings: Settings, args: argparse.Namespace) -> int
 
 def run_coding(store: Store, settings: Settings, args: argparse.Namespace) -> int:
     from .coding import CodeRunError, CodingRunner
+    from .sandbox import DockerSandboxRunner, SandboxError
     if args.code_command == "inspect":
         run = store.get_agent_run(args.run_id)
         if run is None:
@@ -395,21 +400,24 @@ def run_coding(store: Store, settings: Settings, args: argparse.Namespace) -> in
     if settings.mode != "local":
         print("Coding runs require AYU_MODE=local; remote coding-context transfer is not enabled in this initial implementation.", file=sys.stderr)
         return 2
-    if not args.allow_host_tests:
-        print("Coding tests execute with this OS account and Ayu does not provide an OS sandbox. Re-run with --allow-host-tests only if you trust the repository tests.", file=sys.stderr)
-        return 2
     if settings.local_backend != "llama-server":
         print("Coding runs require AYU_LOCAL_BACKEND=llama-server for strict local JSON Schema output; llama-cli remains available for ordinary local chat.", file=sys.stderr)
         return 2
+    sandbox = DockerSandboxRunner.from_environment()
+    try:
+        policy = sandbox.preflight()
+    except SandboxError as exc:
+        print(f"Coding run refused: required Docker sandbox is unavailable: {exc}", file=sys.stderr)
+        return 2
+    print("Execution boundary: local Docker container; network disabled; non-root; resource-bounded; disposable workspace snapshot.", file=sys.stderr)
     try:
         provider = build_local_provider(settings)
-        runner = CodingRunner(provider, store, mode="local")
+        runner = CodingRunner(provider, store, mode="local", sandbox_runner=sandbox)
         result = runner.run(" ".join(args.task), args.workspace, suite=args.test_suite,
-                            test_paths=args.test_path, timeout=args.timeout,
-                            allow_host_tests=args.allow_host_tests)
+                            test_paths=args.test_path, timeout=args.timeout)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["status"] == "completed" else 1
-    except (CodeRunError, ProviderError, OSError, ValueError) as exc:
+    except (CodeRunError, ProviderError, OSError, ValueError, SandboxError) as exc:
         print(f"Coding run failed: {exc}", file=sys.stderr)
         return 1
 
@@ -441,6 +449,38 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Configuration error: {exc}", file=sys.stderr); return 2
     cmd = args.command
     if cmd == "code": return run_coding(store, settings, args)
+    if cmd == "sandbox":
+        from .sandbox import DockerSandboxRunner
+        runner = DockerSandboxRunner.from_environment()
+        if args.sandbox_command == "status":
+            report = runner.status()
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return 0 if report["ready"] else 2
+        run = store.get_agent_run(args.run_id)
+        if run is None:
+            print("Coding run not found.", file=sys.stderr)
+            return 1
+        names = []
+        for item in store.list_agent_events(args.run_id):
+            if item.get("event_type") != "sandbox_container_starting":
+                continue
+            try:
+                payload = json.loads(item["payload_json"])
+                name = payload.get("container_name")
+                if isinstance(name, str) and name not in names:
+                    names.append(name)
+            except (KeyError, TypeError, json.JSONDecodeError):
+                continue
+        if not names:
+            print("No audited sandbox container was recorded for this run.", file=sys.stderr)
+            return 1
+        try:
+            outcomes = [{"container_name": name, "removed_or_absent": runner.cleanup_container(name)} for name in names]
+        except SandboxError as exc:
+            print(f"Sandbox cleanup failed: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps({"run_id": args.run_id, "cleanup": outcomes}, ensure_ascii=False, indent=2))
+        return 0 if all(item["removed_or_absent"] for item in outcomes) else 1
     if cmd == "doctor":
         parent = settings.database_path.parent
         remote_selected=settings.mode=="remote"

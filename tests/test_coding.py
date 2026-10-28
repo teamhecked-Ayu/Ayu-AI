@@ -13,8 +13,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from ayu.coding import CodeRunError, CodingRunner, apply_edits, run_approved_tests, sanitize_test_output
+from ayu.coding import CodeRunError, CodingRunner, apply_edits, sanitize_test_output
 from ayu.cli import main
+from ayu.sandbox import SandboxError
 from ayu.store import Store
 
 
@@ -33,6 +34,26 @@ class FakeProvider:
     def complete_structured(self, messages, schema, *, schema_name):
         self.schemas.append((schema_name, schema))
         return self.complete(messages)
+
+
+class FakeSandbox:
+    """Test-only adapter; it exercises workflow behavior but provides no isolation."""
+    def __init__(self, exit_codes=None):
+        self.exit_codes = list(exit_codes or [0])
+
+    def preflight(self):
+        return {"backend": "fake-test-only", "policy_version": "unit-test", "network": "not-tested"}
+
+    def run_tests(self, workspace, suite, paths, timeout, *, run_id, on_start=None):
+        if on_start is not None:
+            on_start({"backend": "fake-test-only", "container_name": "ayu-test-unit-00000000",
+                      "image": "not-used", "policy_version": "unit-test"})
+        exit_code = self.exit_codes.pop(0) if self.exit_codes else 0
+        return {"command": ["synthetic-test-result"], "exit_code": exit_code, "timed_out": False,
+                "duration_seconds": 0.0, "stdout": "fake test result: passed" if exit_code == 0 else "fake test result: failed",
+                "stderr": "", "infrastructure_error": False, "output_truncated": False,
+                "backend": "fake-test-only", "image": "not-used", "policy_version": "unit-test",
+                "container_name": "ayu-test-unit-00000000", "cleanup_confirmed": True}
 
 
 def init_repo(root: Path, files: dict[str, str]) -> None:
@@ -121,18 +142,6 @@ class PatchSafetyTests(unittest.TestCase):
                 ], {"a.py": digest})
             self.assertEqual(target.read_bytes(), original)
 
-    def test_unsupported_test_command_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            with self.assertRaisesRegex(CodeRunError, "Supported test suites"):
-                run_approved_tests(root, "bash", [], 10, root / "home", allow_host_execution=True)
-
-    def test_test_runner_is_fail_closed_without_direct_consent(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            with self.assertRaisesRegex(CodeRunError, "explicit allow_host_execution=True"):
-                run_approved_tests(root, "compileall", [], 10, root / "home")
-
     def test_audit_output_redacts_common_credentials_and_is_bounded(self):
         output = "x" * 2500 + "\nOPENAI_API_KEY=demo-placeholder-value Authorization: Bearer placeholder123"
         clean = sanitize_test_output(output, 2000)
@@ -167,7 +176,7 @@ class CodingWorkflowTests(unittest.TestCase):
                 json.dumps({"summary": "Bad context must fail safely", "edits": [{"path": "calc.py", "old_text": "not present", "new_text": "return a + b"}]}),
             ])
             with self.assertRaisesRegex(CodeRunError, "Exact edit context") as error:
-                CodingRunner(provider, store).run("Make add return the sum", root, suite="compileall", allow_host_tests=True)
+                CodingRunner(provider, store, sandbox_runner=FakeSandbox()).run("Make add return the sum", root, suite="compileall")
             message = str(error.exception)
             run_id = message.split("Coding run ", 1)[1].split(" failed:", 1)[0]
             self.assertEqual(len(run_id), 32)
@@ -187,22 +196,25 @@ class CodingWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(CodeRunError, "valid JSON"):
             runner._json('Here is the result: {"status":"supported","issues":[]}', "Reviewer", {"status", "issues"})
 
-    def test_cli_requires_host_test_consent_before_provider_setup(self):
+    def test_cli_requires_sandbox_before_provider_setup(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "workspace"; root.mkdir()
             stderr = io.StringIO()
-            env = {"AYU_MODE": "local", "AYU_DATABASE": str(Path(temp) / "state.sqlite3")}
-            with patch.dict(os.environ, env, clear=True), patch("ayu.cli.build_local_provider") as build, contextlib.redirect_stderr(stderr):
+            env = {"AYU_MODE": "local", "AYU_LOCAL_BACKEND": "llama-server", "AYU_DATABASE": str(Path(temp) / "state.sqlite3")}
+            class UnavailableSandbox:
+                def preflight(self):
+                    raise SandboxError("Docker CLI is unavailable")
+            with patch.dict(os.environ, env, clear=True), patch("ayu.sandbox.DockerSandboxRunner.from_environment", return_value=UnavailableSandbox()), patch("ayu.cli.build_local_provider") as build, contextlib.redirect_stderr(stderr):
                 result = main(["code", "run", "make a change", "--workspace", str(root), "--test-suite", "compileall"])
             self.assertEqual(result, 2)
-            self.assertIn("--allow-host-tests", stderr.getvalue())
+            self.assertIn("Docker sandbox is unavailable", stderr.getvalue())
             build.assert_not_called()
 
     def test_cli_requires_llama_server_for_structured_coding(self):
         with tempfile.TemporaryDirectory() as temp:
             stderr = io.StringIO()
             env = {"AYU_MODE": "local", "AYU_LOCAL_BACKEND": "llama-cli", "AYU_DATABASE": str(Path(temp) / "state.sqlite3")}
-            argv = ["code", "run", "make a change", "--workspace", temp, "--test-suite", "compileall", "--allow-host-tests"]
+            argv = ["code", "run", "make a change", "--workspace", temp, "--test-suite", "compileall"]
             with patch.dict(os.environ, env, clear=True), patch("ayu.cli.build_local_provider") as build, contextlib.redirect_stderr(stderr):
                 result = main(argv)
             self.assertEqual(result, 2)
@@ -223,8 +235,8 @@ class CodingWorkflowTests(unittest.TestCase):
                 json.dumps({"summary": "Correct addition implementation", "edits": [{"path": "calc.py", "old_text": "return a - b", "new_text": "return a + b"}]}),
                 json.dumps({"status": "supported", "issues": []}),
             ])
-            result = CodingRunner(provider, store).run(
-                "Make add return the sum", root, suite="unittest", test_paths=["tests"], timeout=20, allow_host_tests=True
+            result = CodingRunner(provider, store, sandbox_runner=FakeSandbox()).run(
+                "Make add return the sum", root, suite="unittest", test_paths=["tests"], timeout=20
             )
             self.assertEqual(result["status"], "completed")
             self.assertEqual(result["test"]["exit_code"], 0)
@@ -240,7 +252,7 @@ class CodingWorkflowTests(unittest.TestCase):
             self.assertIn("return a + b", persisted["diff"])
             test_evidence = next(json.loads(event["payload_json"]) for event in events if event["event_type"] == "test_result")
             self.assertEqual(len(test_evidence["stderr_capture_sha256"]), 64)
-            self.assertIn("OK", test_evidence["stderr_excerpt"])
+            self.assertIn("fake test result: passed", test_evidence["stdout_excerpt"])
             subprocess.run(["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)], check=True, capture_output=True)
             subprocess.run(["git", "-C", str(root), "branch", "-D", result["branch"]], check=True, capture_output=True)
 
@@ -258,8 +270,8 @@ class CodingWorkflowTests(unittest.TestCase):
                 json.dumps({"summary": "Correct failing arithmetic", "edits": [{"path": "calc.py", "old_text": "return a * b", "new_text": "return a + b"}]}),
                 json.dumps({"status": "supported", "issues": []}),
             ])
-            result = CodingRunner(provider, store).run(
-                "Make add return the sum", root, suite="unittest", timeout=20, allow_host_tests=True
+            result = CodingRunner(provider, store, sandbox_runner=FakeSandbox([1, 0])).run(
+                "Make add return the sum", root, suite="unittest", timeout=20
             )
             self.assertEqual(result["status"], "completed")
             self.assertEqual(result["test"]["exit_code"], 0)
@@ -276,9 +288,9 @@ class CodingWorkflowTests(unittest.TestCase):
             init_repo(root, {"calc.py": "x = 1\n"})
             (root / "calc.py").write_text("x = 2\n", encoding="utf-8")
             store = Store(Path(temp) / "state.sqlite3")
-            runner = CodingRunner(FakeProvider([]), store)
+            runner = CodingRunner(FakeProvider([]), store, sandbox_runner=FakeSandbox())
             with self.assertRaisesRegex(CodeRunError, "dirty repository"):
-                runner.run("change it", root, suite="compileall", allow_host_tests=True)
+                runner.run("change it", root, suite="compileall")
             with store.connect() as db:
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM agent_runs").fetchone()[0], 0)
 
@@ -288,9 +300,9 @@ class CodingWorkflowTests(unittest.TestCase):
             init_repo(root, {".gitattributes": "*.py filter=untrusted\n", "calc.py": "x = 1\n"})
             store = Store(Path(temp) / "state.sqlite3")
             provider = FakeProvider([])
-            runner = CodingRunner(provider, store)
+            runner = CodingRunner(provider, store, sandbox_runner=FakeSandbox())
             with self.assertRaisesRegex(CodeRunError, "content filter"):
-                runner.run("make a code change", root, suite="compileall", allow_host_tests=True)
+                runner.run("make a code change", root, suite="compileall")
             self.assertEqual(provider.calls, [])
             with store.connect() as db:
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM agent_runs").fetchone()[0], 0)
