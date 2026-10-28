@@ -174,7 +174,8 @@ class SandboxPolicyTests(unittest.TestCase):
             (mounted / "nested-secret.py").write_text("must not copy", encoding="utf-8")
             dest = Path(temp) / "snapshot"
             real_ismount = os.path.ismount
-            with patch("ayu.sandbox.os.path.ismount", side_effect=lambda path: Path(path) == mounted or real_ismount(path)):
+            is_mounted = lambda path: os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(mounted))
+            with patch("ayu.sandbox.os.path.ismount", side_effect=lambda path: is_mounted(path) or real_ismount(path)):
                 info = DockerSandboxRunner._snapshot(root, dest)
             self.assertFalse((dest / "ordinary-name.txt").exists())
             self.assertFalse((dest / "mounted").exists())
@@ -190,12 +191,19 @@ class SandboxPolicyTests(unittest.TestCase):
             real_open = Path.open
 
             def fake_open(path, *args, **kwargs):
-                if str(path) == "/proc/self/mountinfo":
+                if str(path).replace("\\", "/") == "/proc/self/mountinfo":
                     return io.StringIO(mountinfo)
                 return real_open(path, *args, **kwargs)
 
+            real_exists = Path.exists
+            def fake_exists(path):
+                if str(path).replace("\\", "/") == "/proc/self/mountinfo":
+                    return True
+                return real_exists(path)
+
             dest = Path(temp) / "snapshot"
-            with patch.object(Path, "open", new=fake_open), patch("ayu.sandbox.os.path.ismount", return_value=False):
+            with patch.object(Path, "open", new=fake_open), patch.object(Path, "exists", new=fake_exists), \
+                 patch("ayu.sandbox.os.path.ismount", return_value=False):
                 result = DockerSandboxRunner._snapshot(root, dest)
             self.assertFalse((dest / "same-device-bind").exists())
             self.assertEqual(result["paths_omitted"], 1)
