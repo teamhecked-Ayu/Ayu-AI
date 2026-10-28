@@ -9,7 +9,9 @@ import os
 import sqlite3
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -213,6 +215,46 @@ class CodingWorkflowTests(unittest.TestCase):
             events = store.list_agent_events(rows[0]["id"])
             self.assertEqual(events[0]["event_type"], "run_started")
             self.assertEqual(events[-1]["event_type"], "failure")
+
+    def test_terminated_child_run_is_recovered_as_unknown_after_database_reopen(self):
+        with tempfile.TemporaryDirectory() as temp:
+            database = Path(temp) / "state.sqlite3"
+            run_id = "e" * 32
+            child_code = (
+                "import sys,time; from pathlib import Path; from ayu.store import Store; "
+                "Store(Path(sys.argv[1])).create_agent_run(sys.argv[2], 'interrupted fixture', 'local', 2, "
+                "initial_event=('coding','run_started',{'run_id':sys.argv[2]})); time.sleep(60)"
+            )
+            process = subprocess.Popen([sys.executable, "-c", child_code, str(database), run_id],
+                                       cwd=Path(__file__).resolve().parents[1],
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.PIPE)
+            try:
+                deadline = time.monotonic() + 10
+                persisted = None
+                while time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        stderr = process.stderr.read().decode("utf-8", errors="replace")
+                        self.fail(f"fixture child exited before persisting its run: {stderr[:1000]}")
+                    if database.exists():
+                        try:
+                            persisted = Store(database).get_agent_run(run_id)
+                        except sqlite3.OperationalError:
+                            persisted = None
+                        if persisted is not None:
+                            break
+                    time.sleep(0.05)
+                self.assertIsNotNone(persisted, "child did not persist its run before deadline")
+            finally:
+                process.kill()
+                process.wait(timeout=10)
+                if process.stderr:
+                    process.stderr.close()
+            reopened = Store(database)
+            self.assertEqual(reopened.get_agent_run(run_id)["status"], "running")
+            self.assertEqual(reopened.mark_agent_run_unknown_outcome(run_id, confirmed_stopped=True)["status"],
+                             "unknown_outcome")
+            self.assertEqual(len(reopened.list_agent_events(run_id)), 2)
 
     def test_json_parser_accepts_only_a_single_strict_json_fence(self):
         runner = CodingRunner(FakeProvider([]), Store(Path(tempfile.mkdtemp()) / "state.sqlite3"))

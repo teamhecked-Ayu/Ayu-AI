@@ -33,9 +33,10 @@
 - The transition refuses missing confirmation, missing/non-coding evidence, and terminal runs. It never retries the task or performs cleanup.
 - Existing database rows/events survive the additive table-constraint migration; `PRAGMA foreign_key_check` is clean; reopening the database is idempotent.
 - A fault injected at temporary-run-directory creation is recorded against the already-durable run and ends in `failed`, rather than leaving an unidentifiable `running` record.
+- A disposable child process is force-terminated after persisting a run; a fresh store instance reopens the database and marks the surviving running record `unknown_outcome` without retrying it.
 - **GitHub CI:** Actions run [40661096752](https://github.com/teamhecked-Ayu/Ayu-AI/actions/runs/40661096752) passed on recovery commit `b33b88f`: Ubuntu/macOS/Windows across Python 3.10/3.11/3.12 (nine core combinations), plus the CPU AyuLM train/checkpoint/generation job. Gitleaks [run 40661096704](https://github.com/teamhecked-Ayu/Ayu-AI/actions/runs/40661096704) also passed. This verifies CI tests and scanning, not hard-crash recovery or Docker isolation.
 - **Local verification:** `python -m pytest -q -rs` reported **118 passed, 2 skipped, 16 subtests passed**. Skips: opt-in real llama-server test requires explicit endpoint/model; real Docker integration requires `AYU_TEST_SANDBOX_IMAGE` and Docker. `python -m compileall -q ayu tests`, one-step `python -m ayu.cli test --ayulm-smoke`, Python 3.10/3.11 grammar parsing for 31 source/test files, and `git diff --check` passed. The AyuLM smoke is software-path evidence, not model-quality evidence.
-- **Still unverified:** real Docker security integration remains blocked; crash/SIGKILL/power-loss recovery was not tested as a process-level fault. The tests validate SQLite migration and a fault during temporary directory setup, not the full crash matrix.
+- **Still unverified:** real Docker security integration remains blocked; host shutdown/power-loss durability, concurrent Ayu process coordination, container/worktree reconciliation and the full crash matrix were not tested. The child-process termination test is a bounded disposable SQLite scenario, not evidence of power-loss durability.
 
 ## Next priorities
 
