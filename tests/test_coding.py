@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import sqlite3
 import shutil
 import subprocess
 import tempfile
@@ -189,6 +190,30 @@ class CodingWorkflowTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(root), "branch", "-D", preparation["branch"]], check=True, capture_output=True)
             shutil.rmtree(worktree.parent, ignore_errors=True)
 
+    def test_private_run_directory_failure_is_recorded_after_atomic_run_start(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repo"
+            init_repo(root, {"calc.py": "value = 1\n"})
+            store = Store(Path(temp) / "state.sqlite3")
+            runner = CodingRunner(FakeProvider([]), store, sandbox_runner=FakeSandbox())
+            real_mkdir = Path.mkdir
+
+            def fail_run_directory(path, *args, **kwargs):
+                if path.name.startswith("ayu-code-"):
+                    raise OSError("synthetic directory creation failure")
+                return real_mkdir(path, *args, **kwargs)
+
+            with patch.object(Path, "mkdir", new=fail_run_directory):
+                with self.assertRaisesRegex(CodeRunError, "synthetic directory creation failure"):
+                    runner.run("make a safe code change", root, suite="compileall")
+            with store.connect() as db:
+                rows = db.execute("SELECT id,status FROM agent_runs").fetchall()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["status"], "failed")
+            events = store.list_agent_events(rows[0]["id"])
+            self.assertEqual(events[0]["event_type"], "run_started")
+            self.assertEqual(events[-1]["event_type"], "failure")
+
     def test_json_parser_accepts_only_a_single_strict_json_fence(self):
         runner = CodingRunner(FakeProvider([]), Store(Path(tempfile.mkdtemp()) / "state.sqlite3"))
         parsed = runner._json('```json\n{"status":"supported","issues":[]}\n```', "Reviewer", {"status", "issues"})
@@ -306,6 +331,113 @@ class CodingWorkflowTests(unittest.TestCase):
             self.assertEqual(provider.calls, [])
             with store.connect() as db:
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM agent_runs").fetchone()[0], 0)
+
+    def test_running_coding_run_can_be_marked_unknown_without_rerun_or_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = Store(Path(temp) / "state.sqlite3")
+            run_id = "a" * 32
+            store.create_agent_run(run_id, "test task", "local", 2,
+                                   initial_event=("coding", "run_started", {"worktree": "synthetic"}))
+            result = store.mark_agent_run_unknown_outcome(run_id, confirmed_stopped=True)
+            self.assertEqual(result, {"run_id": run_id, "status": "unknown_outcome", "changed": True})
+            self.assertEqual(store.get_agent_run(run_id)["status"], "unknown_outcome")
+            events = store.list_agent_events(run_id)
+            self.assertEqual([event["event_type"] for event in events], ["run_started", "recovery_unknown_outcome"])
+            recovery = json.loads(events[-1]["payload_json"])
+            self.assertFalse(recovery["automatic_rerun"])
+            self.assertTrue(recovery["worktree_preserved"])
+            self.assertFalse(recovery["container_cleanup_attempted"])
+            self.assertEqual(store.mark_agent_run_unknown_outcome(run_id, confirmed_stopped=True)["changed"], False)
+            self.assertEqual(len(store.list_agent_events(run_id)), 2)
+
+    def test_unknown_outcome_recovery_requires_confirmation_running_state_and_coding_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = Store(Path(temp) / "state.sqlite3")
+            run_id = "b" * 32
+            store.create_agent_run(run_id, "test task", "local", 2)
+            with self.assertRaisesRegex(ValueError, "must confirm"):
+                store.mark_agent_run_unknown_outcome(run_id, confirmed_stopped=False)
+            with self.assertRaisesRegex(ValueError, "no persisted coding events"):
+                store.mark_agent_run_unknown_outcome(run_id, confirmed_stopped=True)
+            store.record_agent_event(run_id, 0, "planner", "plan", {})
+            with self.assertRaisesRegex(ValueError, "no persisted coding events"):
+                store.mark_agent_run_unknown_outcome(run_id, confirmed_stopped=True)
+            store.record_agent_event(run_id, 1, "coding", "sandbox_policy", {})
+            self.assertTrue(store.finish_agent_run(run_id, "completed"))
+            with self.assertRaisesRegex(ValueError, "only a running run"):
+                store.mark_agent_run_unknown_outcome(run_id, confirmed_stopped=True)
+            self.assertEqual(store.get_agent_run(run_id)["status"], "completed")
+
+    def test_coding_run_creation_persists_identity_event_atomically(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = Store(Path(temp) / "state.sqlite3")
+            run_id = "d" * 32
+            store.create_agent_run(run_id, "test task", "local", 2,
+                                   initial_event=("coding", "run_started", {"run_id": run_id}))
+            events = store.list_agent_events(run_id)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["sequence"], 0)
+            self.assertEqual(events[0]["event_type"], "run_started")
+            with self.assertRaises(sqlite3.IntegrityError):
+                store.create_agent_run(run_id, "duplicate", "local", 2,
+                                       initial_event=("coding", "run_started", {"run_id": run_id}))
+            self.assertEqual(len(store.list_agent_events(run_id)), 1)
+
+    def test_legacy_agent_run_status_constraint_migrates_without_losing_events(self):
+        with tempfile.TemporaryDirectory() as temp:
+            database = Path(temp) / "legacy.sqlite3"
+            db = sqlite3.connect(database)
+            db.executescript("""
+                CREATE TABLE agent_runs (
+                    id TEXT PRIMARY KEY, task TEXT NOT NULL,
+                    project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+                    mode TEXT NOT NULL CHECK(mode IN ('local','remote')),
+                    status TEXT NOT NULL CHECK(status IN ('running','completed','failed','cancelled')),
+                    max_steps INTEGER NOT NULL CHECK(max_steps BETWEEN 1 AND 4),
+                    error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE TABLE agent_events (
+                    id INTEGER PRIMARY KEY, run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+                    sequence INTEGER NOT NULL CHECK(sequence >= 0), actor TEXT NOT NULL,
+                    event_type TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                    UNIQUE(run_id,sequence));
+                CREATE INDEX idx_agent_runs_created ON agent_runs(created_at DESC);
+                CREATE INDEX idx_agent_events_run ON agent_events(run_id,sequence);
+                INSERT INTO agent_runs VALUES('legacy-run','task',NULL,'local','running',2,'','2026-01-01','2026-01-01');
+                INSERT INTO agent_events VALUES(1,'legacy-run',0,'coding','worktree_preparing','{}','2026-01-01');
+            """)
+            db.close()
+            store = Store(database)
+            self.assertEqual(store.get_agent_run("legacy-run")["status"], "running")
+            self.assertEqual(len(store.list_agent_events("legacy-run")), 1)
+            with store.connect() as migrated:
+                schema = migrated.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_runs'").fetchone()[0]
+                self.assertIn("unknown_outcome", schema)
+                self.assertEqual(migrated.execute("PRAGMA foreign_key_check").fetchall(), [])
+            # Startup is idempotent after the one-time additive migration.
+            Store(database)
+            self.assertEqual(store.get_agent_run("legacy-run")["status"], "running")
+
+    def test_code_recover_requires_cli_confirmation_and_reports_non_resuming_result(self):
+        with tempfile.TemporaryDirectory() as temp:
+            database = Path(temp) / "state.sqlite3"
+            store = Store(database)
+            run_id = "c" * 32
+            store.create_agent_run(run_id, "test task", "local", 2,
+                                   initial_event=("coding", "run_started", {}))
+            output = io.StringIO()
+            env = {"AYU_DATABASE": str(database), "AYU_MODE": "local"}
+            with patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(output):
+                code = main(["code", "recover", run_id, "--confirm-process-stopped"])
+            self.assertEqual(code, 0)
+            response = json.loads(output.getvalue())
+            self.assertEqual(response["status"], "unknown_outcome")
+            self.assertEqual(store.get_agent_run(run_id)["status"], "unknown_outcome")
+            self.assertIn(f"ayu code inspect {run_id}", response["next_steps"])
+
+    def test_code_recover_cli_requires_explicit_confirmation_flag(self):
+        with self.assertRaises(SystemExit) as error:
+            main(["code", "recover", "a" * 32])
+        self.assertEqual(error.exception.code, 2)
 
 
 if __name__ == "__main__":

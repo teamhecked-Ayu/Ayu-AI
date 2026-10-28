@@ -108,6 +108,10 @@ def build_parser() -> argparse.ArgumentParser:
     code_run.add_argument("--timeout", type=int, default=120, help="Per-sandbox test timeout in seconds (1..600)")
     code_inspect = code_sub.add_parser("inspect", help="Inspect the persistent status, diff, and verification evidence for a coding run")
     code_inspect.add_argument("run_id")
+    code_recover = code_sub.add_parser("recover", help="Mark an interrupted coding run as unknown; never reruns work or removes resources")
+    code_recover.add_argument("run_id")
+    code_recover.add_argument("--confirm-process-stopped", action="store_true", required=True,
+                              help="Confirm no Ayu process is still executing this run")
     sandbox = sub.add_parser("sandbox", help="Inspect the local coding-test isolation backend")
     sandbox_sub = sandbox.add_subparsers(dest="sandbox_command", required=True)
     sandbox_sub.add_parser("status", help="Check local Docker daemon and digest-pinned sandbox image; runs no user code")
@@ -396,6 +400,17 @@ def run_coding(store: Store, settings: Settings, args: argparse.Namespace) -> in
             payload = json.loads(event.pop("payload_json"))
             events.append({**event, "payload": payload})
         print(json.dumps({"run": run, "events": events}, ensure_ascii=False, indent=2))
+        return 0
+    if args.code_command == "recover":
+        try:
+            result = store.mark_agent_run_unknown_outcome(args.run_id, confirmed_stopped=args.confirm_process_stopped)
+        except ValueError as exc:
+            print(f"Coding run recovery refused: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps({**result,
+                          "next_steps": [f"ayu code inspect {args.run_id}",
+                                         f"ayu sandbox cleanup {args.run_id} (only if an audited container may remain)"]},
+                         ensure_ascii=False, indent=2))
         return 0
     if settings.mode != "local":
         print("Coding runs require AYU_MODE=local; remote coding-context transfer is not enabled in this initial implementation.", file=sys.stderr)

@@ -76,7 +76,7 @@ class Store:
                     id TEXT PRIMARY KEY, task TEXT NOT NULL,
                     project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
                     mode TEXT NOT NULL CHECK(mode IN ('local','remote')),
-                    status TEXT NOT NULL CHECK(status IN ('running','completed','failed','cancelled')),
+                    status TEXT NOT NULL CHECK(status IN ('running','completed','failed','cancelled','unknown_outcome')),
                     max_steps INTEGER NOT NULL CHECK(max_steps BETWEEN 1 AND 4),
                     error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS idx_agent_runs_created ON agent_runs(created_at DESC);
@@ -95,6 +95,39 @@ class Store:
             if "provenance" not in columns:
                 db.execute("ALTER TABLE memories ADD COLUMN provenance TEXT NOT NULL DEFAULT 'user'")
             db.execute("CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(category,project_id,id)")
+        self._migrate_agent_run_unknown_outcome()
+
+    def _migrate_agent_run_unknown_outcome(self) -> None:
+        """Rebuild the constrained run table once, preserving rows and child events."""
+        db = sqlite3.connect(self.path, timeout=10)
+        try:
+            db.execute("PRAGMA foreign_keys=OFF")
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_runs'").fetchone()
+            if row is None or "unknown_outcome" in (row[0] or ""):
+                db.commit()
+                return
+            db.execute("""CREATE TABLE agent_runs_new (
+                id TEXT PRIMARY KEY, task TEXT NOT NULL,
+                project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+                mode TEXT NOT NULL CHECK(mode IN ('local','remote')),
+                status TEXT NOT NULL CHECK(status IN ('running','completed','failed','cancelled','unknown_outcome')),
+                max_steps INTEGER NOT NULL CHECK(max_steps BETWEEN 1 AND 4),
+                error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+            db.execute("INSERT INTO agent_runs_new SELECT id,task,project_id,mode,status,max_steps,error,created_at,updated_at FROM agent_runs")
+            db.execute("DROP TABLE agent_runs")
+            db.execute("ALTER TABLE agent_runs_new RENAME TO agent_runs")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_created ON agent_runs(created_at DESC)")
+            violations = db.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise sqlite3.IntegrityError("agent run migration would leave broken foreign keys")
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+            self._secure_permissions()
 
     def add_message(self, session_id: str, role: str, content: str) -> None:
         if role not in {"user", "assistant"}:
@@ -291,7 +324,9 @@ class Store:
         with self.connect() as db:
             return (int(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0]), int(db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]))
 
-    def create_agent_run(self, run_id: str, task: str, mode: str, max_steps: int, project_id: str | None = None) -> None:
+    def create_agent_run(self, run_id: str, task: str, mode: str, max_steps: int,
+                         project_id: str | None = None,
+                         initial_event: tuple[str, str, dict] | None = None) -> None:
         if not isinstance(run_id,str) or not run_id or len(run_id) > 64: raise ValueError("invalid agent run ID")
         if not isinstance(task,str): raise ValueError("agent task must be text")
         task = task.strip()
@@ -300,8 +335,21 @@ class Store:
         if isinstance(max_steps, bool) or not isinstance(max_steps, int) or not 1 <= max_steps <= 4:
             raise ValueError("agent max_steps must be 1..4")
         now = utc_now()
+        serialized_event = None
+        if initial_event is not None:
+            if (not isinstance(initial_event, tuple) or len(initial_event) != 3
+                    or not isinstance(initial_event[0], str) or not initial_event[0] or len(initial_event[0]) > 48
+                    or not isinstance(initial_event[1], str) or not initial_event[1] or len(initial_event[1]) > 48
+                    or not isinstance(initial_event[2], dict)):
+                raise ValueError("invalid initial agent event")
+            serialized_event = json.dumps(initial_event[2], ensure_ascii=False, separators=(",", ":"))
+            if len(serialized_event.encode("utf-8")) > 64 * 1024:
+                raise ValueError("initial agent event exceeds the 64 KiB audit limit")
         with self.connect() as db:
             db.execute("INSERT INTO agent_runs(id,task,project_id,mode,status,max_steps,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (run_id,task,project_id,mode,"running",max_steps,now,now))
+            if serialized_event is not None:
+                db.execute("INSERT INTO agent_events(run_id,sequence,actor,event_type,payload_json,created_at) VALUES(?,0,?,?,?,?)",
+                           (run_id, initial_event[0], initial_event[1], serialized_event, now))
 
     def record_agent_event(self, run_id: str, sequence: int, actor: str, event_type: str, payload: dict) -> None:
         if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0: raise ValueError("event sequence must be a non-negative integer")
@@ -318,6 +366,37 @@ class Store:
         if not isinstance(error,str): raise ValueError("agent run error must be text")
         with self.connect() as db:
             return db.execute("UPDATE agent_runs SET status=?,error=?,updated_at=? WHERE id=? AND status='running'",(status,error[:1000],utc_now(),run_id)).rowcount == 1
+
+    def mark_agent_run_unknown_outcome(self, run_id: str, *, confirmed_stopped: bool) -> dict[str, object]:
+        """Mark a coding run indeterminate after explicit operator confirmation; never retries or cleans resources."""
+        if not isinstance(run_id, str) or not run_id or len(run_id) > 64:
+            raise ValueError("invalid agent run ID")
+        if confirmed_stopped is not True:
+            raise ValueError("operator must confirm the Ayu process is stopped before recovery")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT status FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+            if row is None:
+                raise ValueError("agent run not found")
+            if row["status"] == "unknown_outcome":
+                return {"run_id": run_id, "status": "unknown_outcome", "changed": False}
+            if row["status"] != "running":
+                raise ValueError(f"only a running run can be recovered; current status is {row['status']}")
+            if not db.execute("SELECT 1 FROM agent_events WHERE run_id=? AND actor='coding' LIMIT 1", (run_id,)).fetchone():
+                raise ValueError("run has no persisted coding events; refusing to classify it as a coding run")
+            sequence = int(db.execute("SELECT COALESCE(MAX(sequence),-1)+1 FROM agent_events WHERE run_id=?", (run_id,)).fetchone()[0])
+            now = utc_now()
+            payload = json.dumps({"previous_status": "running", "status": "unknown_outcome",
+                                  "operator_confirmed_process_stopped": True,
+                                  "automatic_rerun": False, "worktree_preserved": True,
+                                  "container_cleanup_attempted": False}, separators=(",", ":"))
+            db.execute("INSERT INTO agent_events(run_id,sequence,actor,event_type,payload_json,created_at) VALUES(?,?,?,?,?,?)",
+                       (run_id, sequence, "operator", "recovery_unknown_outcome", payload, now))
+            changed = db.execute("UPDATE agent_runs SET status='unknown_outcome',error=?,updated_at=? WHERE id=? AND status='running'",
+                                 ("Interrupted run outcome is unknown; inspect audit evidence before any manual action.", now, run_id)).rowcount
+            if changed != 1:
+                raise sqlite3.IntegrityError("agent run state changed during recovery")
+            return {"run_id": run_id, "status": "unknown_outcome", "changed": True}
 
     def get_agent_run(self, run_id: str):
         with self.connect() as db:

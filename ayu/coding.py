@@ -452,17 +452,24 @@ class CodingRunner:
         if not re.fullmatch(r"[0-9a-fA-F]{40,64}", head): raise CodeRunError("Could not verify the base Git commit.")
         run_id = uuid.uuid4().hex
         branch = "ayu/task/" + run_id[:16]
-        run_root = Path(tempfile.mkdtemp(prefix=f"ayu-code-{run_id[:8]}-"))
-        try: run_root.chmod(0o700)
-        except OSError: pass
+        run_root = Path(tempfile.gettempdir()) / f"ayu-code-{run_id[:8]}-{run_id[8:20]}"
         worktree = run_root / "workspace"
-        private_home = run_root / "home"
-        self.store.create_agent_run(run_id, task, self.mode, 2)
-        seq = 0
+        self.store.create_agent_run(
+            run_id, task, self.mode, 2,
+            initial_event=("coding", "run_started", {
+                "run_id": run_id, "workspace": str(workspace), "worktree": str(worktree),
+                "branch": branch, "base_commit": head, "sandbox_required": True,
+                "automatic_rerun": False,
+            }),
+        )
+        seq = 1
         def event(kind: str, data: dict[str, Any]) -> None:
             nonlocal seq
             self.store.record_agent_event(run_id, seq, "coding", kind, data); seq += 1
         try:
+            run_root.mkdir(mode=0o700)
+            try: run_root.chmod(0o700)
+            except OSError: pass
             event("sandbox_policy", sandbox_policy)
             hooks = run_root / "empty-hooks"
             hooks.mkdir(mode=0o700)

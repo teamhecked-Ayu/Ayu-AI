@@ -18,7 +18,7 @@ Untrusted inputs include the user task, repository names and paths, README/docst
 - The Docker client environment is reduced and its configuration is isolated in a private temporary directory. Remote TCP/context use is refused. Explicit POSIX endpoints must be existing Unix sockets, but Ayu cannot prove that a user-managed socket proxy does not forward remotely; configured socket endpoints remain operator-trusted.
 - A digest-pinned image must already exist locally; the runner never pulls or builds images. A fresh disposable snapshot is made per test run; `.git` (directory or worktree pointer file), common credential directories/names/extensions, and most hidden files/config are omitted. Symlinks, hard-linked files, nested mount points, and cross-device entries are refused or omitted. Directory/file traversal is capped at 20,000 entries, copied files at 10,000, each file at 32 MiB, copied content at 256 MiB, and preparation time at a cooperative 60-second deadline between filesystem operations; a blocked kernel/filesystem call can exceed it. Byte limits are enforced while reading and file metadata rechecked after copy. Omitted paths are counted/hashed incrementally rather than accumulated in memory. Files are copied as read-only and the snapshot parent is private.
 - Test execution uses a fixed Python command for `pytest`, `unittest`, or `compileall`. The container command requests `--network=none`, `--read-only`, UID/GID `65532:65532`, `--cap-drop=ALL`, `no-new-privileges`, PID limit 64, 512 MiB memory and swap, one CPU, private IPC, 16 MiB shared memory, and a 64 MiB `/tmp` tmpfs. The task snapshot is mounted read-only. Output is bounded to 256 KiB per stream and wall-clock duration to at most 600 seconds.
-- The run identity/container name is durably recorded before Docker `run` is launched. `--rm` is requested; normal completion inspects for container removal. Timeout/cancellation attempts forced removal. `ayu sandbox cleanup RUN_ID` can force-remove only generated Ayu container names recorded in that run's audit events.
+- The run identity/container name is durably recorded before Docker `run` is launched. `--rm` is requested; normal completion inspects for container removal. Timeout/cancellation attempts forced removal. `ayu sandbox cleanup RUN_ID` can force-remove only generated Ayu container names recorded in that run's audit events. After verifying that no Ayu process is still executing a run, an operator can use `ayu code recover RUN_ID --confirm-process-stopped` to atomically classify a persisted running coding run as `unknown_outcome`; it never retries work or removes resources.
 - Audit output is hashed and best-effort redacted; correction/review prompts receive bounded sanitized output. Redaction recognizes common token/assignment/key patterns but is not exhaustive.
 
 ## Threats and residual risks
@@ -34,7 +34,7 @@ Untrusted inputs include the user task, repository names and paths, README/docst
 | Container writes to task source | Snapshot is read-only in code and Docker bind requested read-only | Mock construction confirms flags only, not daemon enforcement. |
 | Secret exposure in prompt/audit | No host env forwarded to container/model; bounded sanitization; local model only | Arbitrary secrets embedded in source/test output cannot be guaranteed redacted. Do not store credentials in coding repositories. |
 | Git hooks/filters and original source | Local Git checks, hooks path disabled, source untouched; task branch/worktree for edits | The worktree is not a security boundary; local Git and host Ayu run with user privileges. |
-| Crash and continuity | Startup container intent persisted; run IDs and audit events; explicit cleanup command | Automatic reconciliation/resume and proving completion after a hard crash are not implemented. An audit status `running` is not evidence that tests completed. |
+| Crash and continuity | Startup container intent persisted; run IDs and audit events; operator-confirmed transition to `unknown_outcome`; separate explicit container cleanup | Recovery depends on the operator truthfully confirming the process stopped. It does not establish whether tests/review completed, does not clean the worktree/container, and does not resume or retry. Automatic crash detection/reconciliation and proving completion after a hard crash are not implemented. |
 
 ## Control categories (do not conflate them)
 
@@ -45,7 +45,7 @@ Untrusted inputs include the user task, repository names and paths, README/docst
 - **Network isolation:** requested with `--network=none`. **REAL-RUNTIME-VERIFIED: NO.**
 - **Resource controls:** requested through Docker limits. **REAL-RUNTIME-VERIFIED: NO.**
 - **Human approval:** not required as a substitute for sandboxing. Docker/image readiness is mandatory; no host-execution consent switch exists.
-- **Audit logging:** records policy, generated container name, command class, output hashes/excerpts, return code, and cleanup status. Logs are observable evidence, not proof of enforced policy.
+- **Audit logging:** records policy, generated container name, command class, output hashes/excerpts, return code, cleanup status, and the operator's unknown-outcome recovery transition. Logs are observable evidence, not proof of enforced policy or of a truthful operator attestation.
 
 ## Docker assumptions and image preparation
 
