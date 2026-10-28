@@ -158,8 +158,9 @@ class SandboxPolicyTests(unittest.TestCase):
             self.assertFalse((dest / "id_rsa").exists())
             self.assertFalse((dest / "deployment.token").exists())
             self.assertGreaterEqual(result["paths_omitted"], 7)
-            self.assertEqual(dest.stat().st_mode & 0o777, 0o755)
-            self.assertEqual((dest / "module.py").stat().st_mode & 0o777, 0o444)
+            if os.name != "nt":
+                self.assertEqual(dest.stat().st_mode & 0o777, 0o755)
+                self.assertEqual((dest / "module.py").stat().st_mode & 0o777, 0o444)
 
     def test_snapshot_omits_hardlinks_and_nested_mountpoints(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -174,7 +175,8 @@ class SandboxPolicyTests(unittest.TestCase):
             (mounted / "nested-secret.py").write_text("must not copy", encoding="utf-8")
             dest = Path(temp) / "snapshot"
             real_ismount = os.path.ismount
-            is_mounted = lambda path: os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(mounted))
+            mounted_real = os.path.normcase(os.path.realpath(mounted))
+            is_mounted = lambda path: os.path.normcase(os.path.realpath(path)) == mounted_real
             with patch("ayu.sandbox.os.path.ismount", side_effect=lambda path: is_mounted(path) or real_ismount(path)):
                 info = DockerSandboxRunner._snapshot(root, dest)
             self.assertFalse((dest / "ordinary-name.txt").exists())
@@ -182,11 +184,13 @@ class SandboxPolicyTests(unittest.TestCase):
             self.assertGreaterEqual(info["paths_omitted"], 2)
 
     def test_snapshot_excludes_same_device_mountinfo_path(self):
+        if os.name == "nt":
+            self.skipTest("Linux /proc/self/mountinfo is unavailable on Windows")
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "repo"; root.mkdir()
             mounted = root / "same-device-bind"; mounted.mkdir()
             (mounted / "private.py").write_text("not copied", encoding="utf-8")
-            mount_path = str(mounted)
+            mount_path = str(mounted.resolve())
             mountinfo = f"42 1 0:1 / {mount_path} rw - ext4 /dev/example rw\n"
             real_open = Path.open
 
@@ -358,6 +362,8 @@ class SandboxPolicyTests(unittest.TestCase):
             stdout = io.BytesIO(b""); stderr = io.BytesIO(b""); pid = 2_147_483_647
             returncode = None; waits = 0
             def poll(self): return self.returncode
+            def terminate(self): self.returncode = -15
+            def kill(self): self.returncode = -9
             def wait(self, timeout=None):
                 self.waits += 1
                 if self.waits == 1:
@@ -370,7 +376,7 @@ class SandboxPolicyTests(unittest.TestCase):
             with patch.object(runner, "preflight", return_value=SandboxPolicy(VALID_IMAGE).public_dict()), \
                  patch.object(runner, "_remove_container", return_value=True) as remove, \
                  patch.object(runner, "_verify_cleanup", return_value=True) as verify, \
-                 patch("ayu.sandbox.os.killpg", side_effect=ProcessLookupError), \
+                 patch("ayu.sandbox.os.killpg", side_effect=ProcessLookupError, create=True), \
                  patch("ayu.sandbox.subprocess.Popen", return_value=proc):
                 result = runner.run_tests(root, "pytest", ["tests"], 1, run_id="1234567890abcdef")
         self.assertTrue(result["timed_out"])
@@ -384,6 +390,8 @@ class SandboxPolicyTests(unittest.TestCase):
             stdout = io.BytesIO(b""); stderr = io.BytesIO(b""); pid = 2_147_483_647
             returncode = None; waits = 0
             def poll(self): return self.returncode
+            def terminate(self): self.returncode = -15
+            def kill(self): self.returncode = -9
             def wait(self, timeout=None):
                 self.waits += 1
                 if self.waits == 1:
@@ -396,7 +404,7 @@ class SandboxPolicyTests(unittest.TestCase):
             with patch.object(runner, "preflight", return_value=SandboxPolicy(VALID_IMAGE).public_dict()), \
                  patch.object(runner, "_remove_container", return_value=True) as remove, \
                  patch.object(runner, "_verify_cleanup", return_value=True) as verify, \
-                 patch("ayu.sandbox.os.killpg", side_effect=ProcessLookupError), \
+                 patch("ayu.sandbox.os.killpg", side_effect=ProcessLookupError, create=True), \
                  patch("ayu.sandbox.subprocess.Popen", return_value=proc):
                 with self.assertRaises(KeyboardInterrupt):
                     runner.run_tests(root, "pytest", ["tests"], 1, run_id="1234567890abcdef")
