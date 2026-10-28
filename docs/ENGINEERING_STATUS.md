@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-28
 **Repository:** `teamhecked-Ayu/Ayu-AI`
-**Baseline:** `feature/local-runtime-contract` at `ba43c0807497a90cf0cefa6d7a812b432b3963ed`; clean and pushed, eight commits ahead of `main` (`4f72c099`). No pull request exists. This status note and recovery implementation are follow-up work on that feature branch.
+**Baseline:** `feature/local-runtime-contract` at `ba43c0807497a90cf0cefa6d7a812b432b3963ed`; clean and pushed, eight commits ahead of `main` (`4f72c099`). No pull request exists. The recovery implementation was committed and pushed as `b33b88f088c42e160d71ad9c5e4d51264aa45bc8`; `main` remains unchanged and there is no pull request.
 
 ## Project map (source-code inspection)
 
@@ -33,7 +33,9 @@
 - The transition refuses missing confirmation, missing/non-coding evidence, and terminal runs. It never retries the task or performs cleanup.
 - Existing database rows/events survive the additive table-constraint migration; `PRAGMA foreign_key_check` is clean; reopening the database is idempotent.
 - A fault injected at temporary-run-directory creation is recorded against the already-durable run and ends in `failed`, rather than leaving an unidentifiable `running` record.
-- **Not yet verified:** the final recovery changes have not yet run in GitHub Actions or been pushed as a commit. Docker security integration remains blocked.
+- **GitHub CI:** Actions run [40661096752](https://github.com/teamhecked-Ayu/Ayu-AI/actions/runs/40661096752) passed on recovery commit `b33b88f`: Ubuntu/macOS/Windows across Python 3.10/3.11/3.12 (nine core combinations), plus the CPU AyuLM train/checkpoint/generation job. Gitleaks [run 40661096704](https://github.com/teamhecked-Ayu/Ayu-AI/actions/runs/40661096704) also passed. This verifies CI tests and scanning, not hard-crash recovery or Docker isolation.
+- **Local verification:** `python -m pytest -q -rs` reported **118 passed, 2 skipped, 16 subtests passed**. Skips: opt-in real llama-server test requires explicit endpoint/model; real Docker integration requires `AYU_TEST_SANDBOX_IMAGE` and Docker. `python -m compileall -q ayu tests`, one-step `python -m ayu.cli test --ayulm-smoke`, Python 3.10/3.11 grammar parsing for 31 source/test files, and `git diff --check` passed. The AyuLM smoke is software-path evidence, not model-quality evidence.
+- **Still unverified:** real Docker security integration remains blocked; crash/SIGKILL/power-loss recovery was not tested as a process-level fault. The tests validate SQLite migration and a fault during temporary directory setup, not the full crash matrix.
 
 ## Next priorities
 
