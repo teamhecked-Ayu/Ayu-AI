@@ -807,11 +807,231 @@ class OllamaProvider:
             connection.close()
 
 
-def build_local_provider(settings: Settings) -> LlamaCppProvider | LlamaServerProvider | OllamaProvider:
+
+class VLLMProvider:
+    """Local-only vLLM OpenAI-compatible server adapter; no remote fallback."""
+
+    runtime_name = "vllm"
+    MAX_REQUEST_BYTES = 2 * 1024 * 1024
+    MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+    MAX_SSE_LINE_BYTES = 1024 * 1024
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.last_runtime_info: dict[str, str] = {}
+
+    def _endpoint(self) -> tuple[str, int]:
+        try:
+            endpoint = urlsplit(self.settings.vllm_url)
+            host, port = endpoint.hostname, endpoint.port
+        except ValueError:
+            raise ProviderError("AYU_VLLM_URL is not a valid loopback URL.") from None
+        if port is None:
+            port = 8000
+        if (endpoint.scheme != "http" or not host or endpoint.username or endpoint.password
+                or endpoint.query or endpoint.fragment or endpoint.path not in {"", "/"}):
+            raise ProviderError("AYU_VLLM_URL must be plain HTTP to a numeric loopback IP, without credentials, path, query, or fragment.")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            raise ProviderError("AYU_VLLM_URL must use a numeric loopback IP such as 127.0.0.1 or ::1; hostnames and remote addresses are refused.") from None
+        if isinstance(address, ipaddress.IPv6Address) and address.scope_id is not None:
+            raise ProviderError("Scoped IPv6 addresses are not accepted for the local vLLM URL.")
+        if not address.is_loopback:
+            raise ProviderError("vLLM connections are restricted to loopback; no remote fallback or network request was attempted.")
+        if not 1 <= port <= 65535:
+            raise ProviderError("AYU_VLLM_URL port must be between 1 and 65535.")
+        if not 1 <= self.settings.local_timeout <= 3600:
+            raise ProviderError("AYU_LOCAL_TIMEOUT must be between 1 and 3600 seconds.")
+        return address.compressed, port
+
+    def _connection(self):
+        host, port = self._endpoint()
+        return http.client.HTTPConnection(host, port, timeout=self.settings.local_timeout)
+
+    @staticmethod
+    def _json(raw: bytes, label: str) -> dict:
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError, RecursionError):
+            raise ProviderError(f"Local vLLM returned invalid {label} JSON; body suppressed.") from None
+        if not isinstance(value, dict):
+            raise ProviderError(f"Local vLLM returned an invalid {label} response.")
+        return value
+
+    def _request(self, method: str, path: str, payload: dict | None = None) -> bytes:
+        body = None
+        if payload is not None:
+            try:
+                body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            except (TypeError, ValueError, UnicodeError):
+                raise ProviderError("Could not encode a local vLLM request.") from None
+            if len(body) > self.MAX_REQUEST_BYTES:
+                raise ProviderError("Local vLLM request exceeded the 2 MiB safety limit.")
+        connection = self._connection()
+        try:
+            headers = {"Accept": "application/json", "User-Agent": "ayu-ai/0.4.0"}
+            if body is not None:
+                headers["Content-Type"] = "application/json"
+            connection.request(method, path, body=body, headers=headers)
+            response = connection.getresponse()
+            if response.status != 200:
+                raise ProviderError(f"Local vLLM returned HTTP {response.status} for {path}; response body suppressed.")
+            raw = response.read(self.MAX_RESPONSE_BYTES + 1)
+            if len(raw) > self.MAX_RESPONSE_BYTES:
+                raise ProviderError("Local vLLM response exceeded the 8 MiB safety limit.")
+            return raw
+        except ProviderError:
+            raise
+        except (TimeoutError, socket.timeout):
+            raise ProviderError(f"Local vLLM request exceeded {self.settings.local_timeout:g} seconds.") from None
+        except (OSError, http.client.HTTPException):
+            raise ProviderError("Could not connect to the configured local vLLM runtime; details suppressed.") from None
+        finally:
+            connection.close()
+
+    def validate(self) -> str:
+        listing = self._json(self._request("GET", "/v1/models"), "model-list")
+        models = listing.get("data")
+        if not isinstance(models, list):
+            raise ProviderError("Local vLLM did not return a valid /v1/models list.")
+        entries = [item for item in models if isinstance(item, dict)
+                   and isinstance(item.get("id"), str) and item["id"]]
+        configured = self.settings.local_model_id
+        if configured:
+            selected = [item for item in entries if item["id"] == configured]
+            if len(selected) != 1:
+                raise ProviderError("AYU_LOCAL_MODEL_ID must exactly match one model ID reported by local vLLM.")
+        elif len(entries) == 1:
+            selected = entries
+        elif not entries:
+            raise ProviderError("Local vLLM reports no served models; start the server with a model first.")
+        else:
+            raise ProviderError("vLLM reports multiple model IDs; set AYU_LOCAL_MODEL_ID to an exact ID.")
+        self.last_runtime_info = {"model_id": selected[0]["id"]}
+        return selected[0]["id"]
+
+    def _messages(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
+        limit = self.settings.local_max_input_chars
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1_000_000:
+            raise ProviderError("AYU_LOCAL_MAX_INPUT_CHARS must be between 1 and 1000000.")
+        if not isinstance(messages, list) or not messages or len(messages) > 100:
+            raise ProviderError("Local chat requires between 1 and 100 messages.")
+        clean, total = [], 0
+        for item in messages:
+            if not isinstance(item, dict) or set(item) != {"role", "content"}:
+                raise ProviderError("Local chat messages must contain only role and content fields.")
+            role, text = item["role"], item["content"]
+            if role not in {"system", "user", "assistant"} or not isinstance(text, str):
+                raise ProviderError("Local chat supports only system, user, and assistant text messages.")
+            total += len(text)
+            if total > limit:
+                raise ProviderError(f"Local chat exceeds AYU_LOCAL_MAX_INPUT_CHARS ({limit}).")
+            clean.append({"role": role, "content": text})
+        return clean
+
+    def _payload(self, messages: list[dict[str, str]]) -> dict:
+        tokens = self.settings.max_output_tokens
+        if isinstance(tokens, bool) or not isinstance(tokens, int) or not 1 <= tokens <= 8192:
+            raise ProviderError("AYU_MAX_OUTPUT_TOKENS must be between 1 and 8192.")
+        return {"model": self.validate(), "messages": self._messages(messages),
+                "max_tokens": tokens, "stream": False}
+
+    def complete(self, messages: list[dict[str, str]]) -> str:
+        result = self._json(self._request("POST", "/v1/chat/completions", self._payload(messages)), "chat")
+        choices = result.get("choices")
+        message = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+        answer = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(answer, str) or not answer.strip():
+            raise ProviderError("Local vLLM returned no text completion.")
+        return answer.strip()
+
+    def complete_structured(self, messages: list[dict[str, str]], schema: dict, *, schema_name: str) -> str:
+        if not isinstance(schema_name, str) or not schema_name or len(schema_name) > 64 or not schema_name[0].isalpha() or any(not (c.isalnum() or c == "_") for c in schema_name):
+            raise ProviderError("Local structured-output schema name is invalid.")
+        if not isinstance(schema, dict):
+            raise ProviderError("Local structured output requires a JSON Schema object.")
+        try:
+            encoded = json.dumps(schema, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError):
+            raise ProviderError("Local structured-output schema is not serializable JSON.") from None
+        if len(encoded) > 128 * 1024:
+            raise ProviderError("Local structured-output schema exceeded the 128 KiB limit.")
+        payload = self._payload(messages)
+        payload["response_format"] = {"type": "json_schema", "json_schema": {"name": schema_name, "strict": True, "schema": schema}}
+        result = self._json(self._request("POST", "/v1/chat/completions", payload), "structured chat")
+        choices = result.get("choices")
+        message = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+        answer = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(answer, str) or not answer.strip():
+            raise ProviderError("Local vLLM returned no structured text; verify guided-decoding support in the installed vLLM version.")
+        return answer.strip()
+
+    def stream_complete(self, messages: list[dict[str, str]]) -> Iterator[str]:
+        payload = self._payload(messages)
+        payload["stream"] = True
+        try:
+            body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError):
+            raise ProviderError("Could not encode a local vLLM streaming request.") from None
+        if len(body) > self.MAX_REQUEST_BYTES:
+            raise ProviderError("Local vLLM request exceeded the 2 MiB safety limit.")
+        connection = self._connection()
+        received, total = False, 0
+        deadline = time.monotonic() + self.settings.local_timeout
+        try:
+            connection.request("POST", "/v1/chat/completions", body=body,
+                               headers={"Accept": "text/event-stream", "Content-Type": "application/json",
+                                        "User-Agent": "ayu-ai/0.4.0"})
+            response = connection.getresponse()
+            if response.status != 200:
+                raise ProviderError(f"Local vLLM returned HTTP {response.status} for streaming chat; response body suppressed.")
+            if "text/event-stream" not in (response.getheader("Content-Type") or "").lower():
+                raise ProviderError("Local vLLM did not return a server-sent-event stream.")
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ProviderError(f"Local vLLM stream exceeded {self.settings.local_timeout:g} seconds.")
+                if connection.sock is not None:
+                    connection.sock.settimeout(remaining)
+                line = response.readline(self.MAX_SSE_LINE_BYTES + 1)
+                if not line:
+                    break
+                total += len(line)
+                if len(line) > self.MAX_SSE_LINE_BYTES or total > self.MAX_RESPONSE_BYTES:
+                    raise ProviderError("Local vLLM stream exceeded its response safety limit.")
+                line = line.strip()
+                if not line or line.startswith(b":") or not line.startswith(b"data:"):
+                    continue
+                data = line[5:].strip()
+                if data == b"[DONE]":
+                    break
+                event = self._json(data, "stream event")
+                choices = event.get("choices")
+                delta = choices[0].get("delta") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+                chunk = delta.get("content") if isinstance(delta, dict) else None
+                if isinstance(chunk, str) and chunk:
+                    received = True
+                    yield chunk
+            if not received:
+                raise ProviderError("Local vLLM stream ended without generated text.")
+        except ProviderError:
+            raise
+        except (TimeoutError, socket.timeout):
+            raise ProviderError(f"Local vLLM stream exceeded {self.settings.local_timeout:g} seconds.") from None
+        except (OSError, http.client.HTTPException):
+            raise ProviderError("Local vLLM streaming connection failed; details suppressed.") from None
+        finally:
+            connection.close()
+
+
+def build_local_provider(settings: Settings) -> LlamaCppProvider | LlamaServerProvider | OllamaProvider | VLLMProvider:
+    if settings.local_backend == "vllm":
+        return VLLMProvider(settings)
     if settings.local_backend == "ollama":
         return OllamaProvider(settings)
     if settings.local_backend == "llama-server":
         return LlamaServerProvider(settings)
     if settings.local_backend != "llama-cli":
-        raise ProviderError("AYU_LOCAL_BACKEND must be llama-cli, llama-server, or ollama.")
+        raise ProviderError("AYU_LOCAL_BACKEND must be llama-cli, llama-server, ollama, or vllm.")
     return LlamaCppProvider(settings)
