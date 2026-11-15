@@ -105,7 +105,7 @@ class AgentRunner:
         self._model_calls = 0
         self._tool_calls = 0
         self._output_bytes = 0
-        self.policy.check_budget(self.contract, elapsed_seconds=0, tool_calls=max_steps)
+        self.policy.check_budget(self.contract, elapsed_seconds=0)
         self.store.create_agent_run(run_id, task, self.mode, max_steps, project_id,
             initial_event=("system", "run_started", {"mode": self.mode, "max_steps": max_steps, "execution_contract": self.contract.public_dict()}))
         sequence = 1
