@@ -59,6 +59,18 @@ class ConfigTests(unittest.TestCase):
             ChatProvider(settings.__class__(api_key="test",base_url=settings.base_url,model="m",database_path=settings.database_path)).complete([])
 
 
+    def test_vllm_backend_settings_are_explicit_and_loopback_defaulted(self):
+        with patch.dict(os.environ, {
+            "AYU_LOCAL_BACKEND": "vllm",
+            "AYU_LOCAL_MODEL_ID": "Qwen/Qwen2.5-7B-Instruct",
+            "AYU_VLLM_URL": "http://127.0.0.1:8000",
+            "AYU_DATABASE": "/tmp/ayu-test.sqlite",
+        }, clear=True):
+            settings = Settings.load(Path("/nonexistent/.env"))
+        self.assertEqual(settings.local_backend, "vllm")
+        self.assertEqual(settings.local_model_id, "Qwen/Qwen2.5-7B-Instruct")
+        self.assertEqual(settings.vllm_url, "http://127.0.0.1:8000")
+
 class ProviderTests(unittest.TestCase):
     def settings(self, **overrides):
         values = dict(api_key="test-key", base_url="https://api.example.test/v1", model="test-model",
