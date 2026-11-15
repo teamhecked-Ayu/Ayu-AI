@@ -90,3 +90,15 @@ class ProviderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_vllm_backend_settings_are_explicit_and_loopback_defaulted(self):
+        with patch.dict(os.environ, {
+            "AYU_LOCAL_BACKEND": "vllm",
+            "AYU_LOCAL_MODEL_ID": "Qwen/Qwen2.5-7B-Instruct",
+            "AYU_VLLM_URL": "http://127.0.0.1:8000",
+            "AYU_DATABASE": "/tmp/ayu-test.sqlite",
+        }, clear=True):
+            settings = Settings.load(Path("/nonexistent/.env"))
+        self.assertEqual(settings.local_backend, "vllm")
+        self.assertEqual(settings.local_model_id, "Qwen/Qwen2.5-7B-Instruct")
+        self.assertEqual(settings.vllm_url, "http://127.0.0.1:8000")
