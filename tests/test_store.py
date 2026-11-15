@@ -87,3 +87,31 @@ class StoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_agent_event_hash_chain_verifies_and_detects_tampering(self):
+        run_id = "audit-chain-test"
+        self.store.create_agent_run(
+            run_id, "verify audit", "local", 2,
+            initial_event=("system", "run_started", {"contract": "test"}),
+        )
+        self.store.record_agent_event(run_id, 1, "planner", "plan", {"steps": []})
+        valid = self.store.verify_agent_event_integrity(run_id)
+        self.assertTrue(valid["valid"])
+        self.assertEqual(valid["events_checked"], 2)
+        with self.store.connect() as db:
+            db.execute(
+                "UPDATE agent_events SET payload_json=? WHERE run_id=? AND sequence=1",
+                ('{"steps":[{"tool":"tampered"}]}', run_id),
+            )
+        invalid = self.store.verify_agent_event_integrity(run_id)
+        self.assertFalse(invalid["valid"])
+        self.assertEqual(invalid["reason"], "event_hash_mismatch")
+
+    def test_agent_event_sequence_must_be_contiguous(self):
+        run_id = "audit-sequence-test"
+        self.store.create_agent_run(
+            run_id, "verify sequence", "local", 2,
+            initial_event=("system", "run_started", {}),
+        )
+        with self.assertRaisesRegex(ValueError, "contiguous"):
+            self.store.record_agent_event(run_id, 2, "planner", "plan", {})
