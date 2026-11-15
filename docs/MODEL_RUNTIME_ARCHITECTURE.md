@@ -37,7 +37,7 @@ that do not implement structured output.
 6. Model identity must be checked where the backend exposes enough information.
 7. Optional capabilities must be detected structurally, not by checking a
    concrete provider class.
-8. Runtime metadata must never expose API keys or arbitrary environment values.
+8. Runtime metadata must never expose API keys or arbitrary environment values. Configured model identity must not be described as verified loaded identity until the adapter performs a successful backend identity check.
 
 ## Planned adapter sequence
 
