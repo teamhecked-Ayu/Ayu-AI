@@ -84,10 +84,6 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(OSError,"symbolic link"):
             Store(alias)
 
-
-if __name__ == "__main__":
-    unittest.main()
-
     def test_agent_event_hash_chain_verifies_and_detects_tampering(self):
         run_id = "audit-chain-test"
         self.store.create_agent_run(
@@ -115,3 +111,7 @@ if __name__ == "__main__":
         )
         with self.assertRaisesRegex(ValueError, "contiguous"):
             self.store.record_agent_event(run_id, 2, "planner", "plan", {})
+
+
+if __name__ == "__main__":
+    unittest.main()
