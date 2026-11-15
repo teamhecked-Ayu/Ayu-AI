@@ -268,6 +268,7 @@ class CodingRunner:
         self.policy = ExecutionPolicy()
         self.started_at = time.monotonic()
         self.process_invocations = 0
+        self.output_bytes = 0
 
     def _ask(self, system: str, user: str, *, schema: dict[str, Any], schema_name: str) -> str:
         self.calls += 1
@@ -288,7 +289,8 @@ class CodingRunner:
         if not isinstance(result, str) or not result.strip() or len(result) > 24_000:
             raise CodeRunError("Local model returned empty or oversized coding output.")
         if self.contract is not None:
-            self.policy.check_budget(self.contract, elapsed_seconds=elapsed_since(self.started_at), model_calls=self.calls, process_invocations=self.process_invocations)
+            self.output_bytes += len(result.encode("utf-8"))
+            self.policy.check_budget(self.contract, elapsed_seconds=elapsed_since(self.started_at), model_calls=self.calls, process_invocations=self.process_invocations, output_bytes=self.output_bytes)
         return result.strip()
 
     @staticmethod
@@ -464,6 +466,7 @@ class CodingRunner:
         self.started_at = time.monotonic()
         self.calls = 0
         self.process_invocations = 0
+        self.output_bytes = 0
         branch = "ayu/task/" + run_id[:16]
         run_root = Path(tempfile.gettempdir()) / f"ayu-code-{run_id[:8]}-{run_id[8:20]}"
         worktree = run_root / "workspace"
