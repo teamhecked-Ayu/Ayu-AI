@@ -46,15 +46,9 @@ that do not implement structured output.
    enforcement, exact installed-model selection, bounded requests/responses,
    timeouts, NDJSON streaming, and backend-constrained JSON Schema output. Ayu
    never calls the model-pull API.
-3. **vLLM / OpenAI-compatible local server** — next adapter; local-only
-   OpenAI-compatible transport with strict loopback validation and exact model
-   selection.
-4. **AyuLM** — a native adapter only after the model's inference interface and
-   serialization format are stable. Training/checkpoint commands are not
-   interchangeable with chat inference.
-5. **Runtime verification and evaluation** — explicit health checks, model
-   identity, context limits where verifiable, throughput and task-quality
-   benchmarks. Reports must distinguish measured facts from backend claims.
+3. **vLLM** — implemented local-only OpenAI-compatible adapter with numeric-loopback enforcement, exact served-model selection, bounded requests/responses, SSE streaming, and JSON-Schema response-format support. Structured decoding depends on the installed vLLM version and server configuration.
+4. **AyuLM** — a native adapter only after the model's inference interface and serialization format are stable. Training/checkpoint commands are not interchangeable with chat inference.
+5. **Runtime verification and evaluation** — next: explicit health checks, model identity, context limits where verifiable, throughput and task-quality benchmarks. Reports must distinguish measured facts from backend claims.
 
 ## Acceptance gates for each future adapter
 
@@ -73,9 +67,7 @@ that do not implement structured output.
 
 ## Current limitations
 
-This milestone adds Ollama support but does not add a vLLM adapter, model
-pull/download automation, automatic model recommendation, or cross-platform
-live inference verification. The
+This milestone adds Ollama and vLLM adapters but does not add model pull/download automation, automatic model recommendation, or cross-platform live inference verification. vLLM discovery verifies served model IDs via `/v1/models`; it does not establish weight provenance, GPU health, or model quality. The
 existing llama-server model/context checks are stronger than the llama-cli
 checks; the latter cannot prove chat-template token counts. Local inference
 binaries and model parsers run with the current user's privileges and are not
