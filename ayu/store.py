@@ -183,16 +183,19 @@ class Store:
     def verify_agent_event_integrity(self, run_id: str) -> dict[str, object]:
         """Verify event sequence and SHA-256 chain; this detects edits, not privileged deletion."""
         with self.connect() as db:
+            if not db.execute("SELECT 1 FROM agent_runs WHERE id=?", (run_id,)).fetchone():
+                return {"valid": False, "events_checked": 0, "reason": "run_not_found"}
             events = db.execute(
                 "SELECT e.run_id,e.sequence,e.actor,e.event_type,e.payload_json,e.created_at,"
                 "i.previous_hash,i.event_hash FROM agent_events e "
                 "LEFT JOIN agent_event_integrity i ON i.run_id=e.run_id AND i.sequence=e.sequence "
                 "WHERE e.run_id=? ORDER BY e.sequence", (run_id,)
             ).fetchall()
-        with self.connect() as db:
             integrity_count = int(db.execute(
                 "SELECT COUNT(*) FROM agent_event_integrity WHERE run_id=?", (run_id,)
             ).fetchone()[0])
+        if not events:
+            return {"valid": False, "events_checked": 0, "reason": "no_events"}
         if integrity_count != len(events):
             return {"valid": False, "events_checked": 0, "reason": "event_integrity_count_mismatch"}
         previous = "0" * 64
