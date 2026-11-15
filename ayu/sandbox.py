@@ -581,20 +581,25 @@ class DockerSandboxRunner:
                 timed_out = False
                 cleanup: bool | None = None
                 try:
-                    proc.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    timed_out = True
-                    cleanup = self._remove_container(container_name, config)
-                    self._stop_client(proc)
-                    cleanup = cleanup and self._verify_cleanup(container_name, config)
-                except KeyboardInterrupt:
+                    try:
+                        proc.wait(timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        timed_out = True
+                        cleanup = self._remove_container(container_name, config)
+                        self._stop_client(proc)
+                        cleanup = cleanup and self._verify_cleanup(container_name, config)
+                    # Keep the output-drain joins inside the same interruption
+                    # boundary. An interrupt here must not strand a live container.
+                    for thread in threads:
+                        thread.join(timeout=5)
+                except BaseException:
+                    # Cover KeyboardInterrupt and unexpected wait/join failures.
+                    # Cleanup is exact-name scoped; never enumerate or stop other
+                    # containers. The original exception is re-raised afterwards.
                     cleanup = self._remove_container(container_name, config)
                     self._stop_client(proc)
                     cleanup = cleanup and self._verify_cleanup(container_name, config)
                     raise
-                finally:
-                    for thread in threads:
-                        thread.join(timeout=5)
                 if cleanup is None:
                     cleanup = self._verify_cleanup(container_name, config)
                 out = bytes(stdout).decode("utf-8", errors="replace")
