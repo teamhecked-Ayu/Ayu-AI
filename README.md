@@ -292,6 +292,10 @@ ayu train-resume ./ayu-small.pt --data ./licensed-or-owned-corpus.txt --steps 10
 
 The native pipeline uses a deterministic, disjoint internal train/validation byte split, saves optimizer/RNG state for resumption, checks corpus identity/configuration when resuming, and writes tokenizer metadata and a local model registry entry under `~/.ayu-ai/` by default. External `evaluate` data should be held out by the user. Benchmark reports local autoregressive throughput, not quality or a cross-machine score. Generated samples can be incoherent or contain replacement characters until a sufficiently large, appropriate corpus and training budget are used. Model files may be large and checkpoints record source paths; inspect metadata before sharing.
 
+## P0 execution contract and audit integrity
+
+Agent and coding runs are bound to immutable execution contracts with fixed capability sets, workspace scope, and application-level resource budgets. Local agents receive read-only workspace access; remote agent runs require explicit `--allow-remote-context`; coding writes are restricted to a separate task worktree and test execution remains restricted to the fixed Docker sandbox runner. Unknown capabilities are denied. Agent audit events are SHA-256 hash-chained and can be checked with `ayu audit verify RUN_ID`; agent/coding inspect output also reports integrity status. These controls are application-level policy and tamper-evident local logging, not an OS sandbox or externally anchored audit signature. See [the execution contract](docs/EXECUTION_CONTRACT.md).
+
 ## Tests and platform support
 
 ```sh
