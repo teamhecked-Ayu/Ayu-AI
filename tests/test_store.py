@@ -113,5 +113,19 @@ class StoreTests(unittest.TestCase):
             self.store.record_agent_event(run_id, 2, "planner", "plan", {})
 
 
+    def test_agent_event_deletion_without_integrity_record_is_detected(self):
+        run_id = "audit-deletion-test"
+        self.store.create_agent_run(
+            run_id, "verify deletion", "local", 2,
+            initial_event=("system", "run_started", {}),
+        )
+        self.store.record_agent_event(run_id, 1, "planner", "plan", {"steps": []})
+        with self.store.connect() as db:
+            db.execute("DELETE FROM agent_events WHERE run_id=? AND sequence=1", (run_id,))
+        result = self.store.verify_agent_event_integrity(run_id)
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason"], "event_integrity_count_mismatch")
+
+
 if __name__ == "__main__":
     unittest.main()
