@@ -7,6 +7,7 @@ from typing import Any
 
 from .store import Store
 from .tools import ToolError, ToolRegistry
+from .execution import ExecutionContract, ExecutionPolicy, ExecutionPolicyError, elapsed_since
 
 MAX_RESPONSE_CHARS = 16_000
 
@@ -23,15 +24,27 @@ REVIEWER_SYSTEM = """You are the Ayu AI reviewer agent. Independently check the 
 class AgentRunner:
     """Runs one bounded plan and review cycle; there are no recursive agent loops."""
 
-    def __init__(self, provider: Any, store: Store, tools: ToolRegistry, *, mode: str):
+    def __init__(self, provider: Any, store: Store, tools: ToolRegistry, *, mode: str, remote_context_approved: bool = False, contract: ExecutionContract | None = None):
         if mode not in {"local", "remote"}:
             raise ValueError("Agent mode must be explicitly local or remote.")
         self.provider = provider
         self.store = store
         self.tools = tools
         self.mode = mode
+        self.contract = contract or ExecutionContract.for_agent(tools.workspace, mode=mode, remote_context_approved=remote_context_approved)
+        self.policy = ExecutionPolicy()
+        self.policy.authorize(self.contract, ("workspace.read",), workspace=tools.workspace)
+        if mode == "local":
+            self.policy.authorize(self.contract, ("model.inference.local",))
+        else:
+            self.policy.authorize(self.contract, ("model.inference.remote", "remote_context.send"))
+        if tools.contract is not None and tools.contract != self.contract:
+            raise ValueError("Tool registry is already bound to a different execution contract.")
+        tools.contract = self.contract
 
     def _complete(self, actor: str, system: str, user: str) -> str:
+        self.policy.authorize(self.contract, ("model.inference.local" if self.mode == "local" else "model.inference.remote",))
+        self.policy.check_budget(self.contract, elapsed_seconds=elapsed_since(self._started), model_calls=self._model_calls + 1, tool_calls=self._tool_calls)
         output = self.provider.complete([
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -40,6 +53,8 @@ class AgentRunner:
             raise AgentRunError(f"{actor} returned an empty/non-text response.")
         if len(output) > MAX_RESPONSE_CHARS:
             raise AgentRunError(f"{actor} response exceeded {MAX_RESPONSE_CHARS} characters.")
+        self._model_calls += 1
+        self.policy.check_budget(self.contract, elapsed_seconds=elapsed_since(self._started), model_calls=self._model_calls, tool_calls=self._tool_calls)
         return output.strip()
 
     @staticmethod
@@ -84,10 +99,15 @@ class AgentRunner:
         if isinstance(max_steps, bool) or not isinstance(max_steps, int) or not 1 <= max_steps <= 4:
             raise ValueError("max_steps must be between 1 and 4.")
         run_id = uuid.uuid4().hex
-        self.store.create_agent_run(run_id, task, self.mode, max_steps, project_id)
-        sequence = 0
+        self._started = __import__('time').monotonic()
+        self._model_calls = 0
+        self._tool_calls = 0
+        self.policy.check_budget(self.contract, elapsed_seconds=0, tool_calls=max_steps)
+        self.store.create_agent_run(run_id, task, self.mode, max_steps, project_id,
+            initial_event=("system", "run_started", {"mode": self.mode, "max_steps": max_steps, "execution_contract": self.contract.public_dict()}))
+        sequence = 1
         try:
-            self.store.record_agent_event(run_id, sequence, "system", "run_started", {"mode": self.mode, "max_steps": max_steps, "tools": [t["tool_id"] for t in self.tools.list_tools()]})
+            self.store.record_agent_event(run_id, sequence, "system", "tool_registry", {"tools": [t["tool_id"] for t in self.tools.list_tools()]})
             sequence += 1
             registry = json.dumps(self.tools.list_tools(), ensure_ascii=False, separators=(",", ":"))
             plan_raw = self._complete("planner", PLANNER_SYSTEM, f"User task (untrusted):\n{task}\n\nRead-only tool registry JSON:\n{registry}\n\nProduce the bounded JSON plan.")
@@ -98,6 +118,8 @@ class AgentRunner:
             observations: list[dict[str, Any]] = []
             for number, step in enumerate(steps, 1):
                 # invoke() validates the strict per-tool schema and enforces workspace boundaries.
+                self._tool_calls += 1
+                self.policy.check_budget(self.contract, elapsed_seconds=elapsed_since(self._started), model_calls=self._model_calls, tool_calls=self._tool_calls)
                 observation = self.tools.invoke(step["tool_id"], step["arguments"])
                 entry = {"step": number, "tool_id": step["tool_id"], "arguments": step["arguments"], "observation": observation}
                 observations.append(entry)
