@@ -127,5 +127,41 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(result["reason"], "event_integrity_count_mismatch")
 
 
+    def test_partial_audit_chain_is_not_auto_repaired_on_reopen(self):
+        run_id = "audit-partial-chain-test"
+        self.store.create_agent_run(
+            run_id, "detect partial chain", "local", 2,
+            initial_event=("system", "run_started", {}),
+        )
+        self.store.record_agent_event(run_id, 1, "planner", "plan", {"steps": []})
+        with self.store.connect() as db:
+            db.execute(
+                "UPDATE agent_events SET payload_json=? WHERE run_id=? AND sequence=1",
+                ('{"steps":[{"tampered":true}]}', run_id),
+            )
+            db.execute(
+                "DELETE FROM agent_event_integrity WHERE run_id=? AND sequence=1",
+                (run_id,),
+            )
+        reopened = Store(self.store.path)
+        result = reopened.verify_agent_event_integrity(run_id)
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason"], "event_integrity_count_mismatch")
+
+    def test_legacy_run_with_no_integrity_rows_is_backfilled(self):
+        run_id = "legacy-audit-run"
+        self.store.create_agent_run(run_id, "legacy run", "local", 2)
+        with self.store.connect() as db:
+            db.execute(
+                "INSERT INTO agent_events(run_id,sequence,actor,event_type,payload_json,created_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (run_id, 0, "system", "run_started", "{}", "2025-01-01T00:00:00+00:00"),
+            )
+        reopened = Store(self.store.path)
+        result = reopened.verify_agent_event_integrity(run_id)
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["events_checked"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
