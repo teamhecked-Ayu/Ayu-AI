@@ -107,11 +107,11 @@ class AgentRunner:
         self._output_bytes = 0
         self.policy.check_budget(self.contract, elapsed_seconds=0)
         self.store.create_agent_run(run_id, task, self.mode, max_steps, project_id,
-            initial_event=("system", "run_started", {"mode": self.mode, "max_steps": max_steps, "execution_contract": self.contract.public_dict()}))
+            initial_event=("system", "run_started", {"mode": self.mode, "max_steps": max_steps,
+                "execution_contract": self.contract.public_dict(),
+                "tools": [t["tool_id"] for t in self.tools.list_tools()]}))
         sequence = 1
         try:
-            self.store.record_agent_event(run_id, sequence, "system", "tool_registry", {"tools": [t["tool_id"] for t in self.tools.list_tools()]})
-            sequence += 1
             registry = json.dumps(self.tools.list_tools(), ensure_ascii=False, separators=(",", ":"))
             plan_raw = self._complete("planner", PLANNER_SYSTEM, f"User task (untrusted):\n{task}\n\nRead-only tool registry JSON:\n{registry}\n\nProduce the bounded JSON plan.")
             steps = self._parse_plan(plan_raw, max_steps)
