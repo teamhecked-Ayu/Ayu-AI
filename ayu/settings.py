@@ -51,6 +51,7 @@ class Settings:
     local_backend: str = "llama-cli"
     llama_server_url: str = "http://127.0.0.1:9931"
     ollama_url: str = "http://127.0.0.1:11434"
+    vllm_url: str = "http://127.0.0.1:8000"
     local_model_id: str | None = None
     local_max_input_chars: int = 65536
 
@@ -62,8 +63,8 @@ class Settings:
         max_tokens = int(os.getenv("AYU_MAX_OUTPUT_TOKENS", "512"))
         local_timeout = float(os.getenv("AYU_LOCAL_TIMEOUT", "300"))
         local_backend = os.getenv("AYU_LOCAL_BACKEND", "llama-cli").strip().lower()
-        if local_backend not in {"llama-cli", "llama-server", "ollama"}:
-            raise ValueError("AYU_LOCAL_BACKEND must be llama-cli, llama-server, or ollama")
+        if local_backend not in {"llama-cli", "llama-server", "ollama", "vllm"}:
+            raise ValueError("AYU_LOCAL_BACKEND must be llama-cli, llama-server, ollama, or vllm")
         local_max_input_chars = int(os.getenv("AYU_LOCAL_MAX_INPUT_CHARS", "65536"))
         if not 1 <= local_max_input_chars <= 1_000_000:
             raise ValueError("AYU_LOCAL_MAX_INPUT_CHARS must be between 1 and 1000000")
@@ -113,6 +114,7 @@ class Settings:
             local_backend=local_backend,
             llama_server_url=os.getenv("AYU_LLAMA_SERVER_URL", "http://127.0.0.1:9931").strip(),
             ollama_url=os.getenv("AYU_OLLAMA_URL", "http://127.0.0.1:11434").strip(),
+            vllm_url=os.getenv("AYU_VLLM_URL", "http://127.0.0.1:8000").strip(),
             local_model_id=os.getenv("AYU_LOCAL_MODEL_ID", "").strip() or None,
             local_max_input_chars=local_max_input_chars,
         )
