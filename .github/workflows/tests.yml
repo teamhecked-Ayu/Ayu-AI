@@ -4,12 +4,6 @@ on:
   push:
   pull_request:
   workflow_dispatch:
-    inputs:
-      docker_integration:
-        description: "Run the opt-in real Docker sandbox boundary tests"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -57,8 +51,7 @@ jobs:
         run: python -m pytest -q
 
   docker-runtime-integration:
-    name: Real Docker sandbox boundary (manual)
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.docker_integration }}
+    name: Real Docker sandbox boundary
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
