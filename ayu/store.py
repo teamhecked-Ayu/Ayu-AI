@@ -185,6 +185,12 @@ class Store:
                 "LEFT JOIN agent_event_integrity i ON i.run_id=e.run_id AND i.sequence=e.sequence "
                 "WHERE e.run_id=? ORDER BY e.sequence", (run_id,)
             ).fetchall()
+        with self.connect() as db:
+            integrity_count = int(db.execute(
+                "SELECT COUNT(*) FROM agent_event_integrity WHERE run_id=?", (run_id,)
+            ).fetchone()[0])
+        if integrity_count != len(events):
+            return {"valid": False, "events_checked": 0, "reason": "event_integrity_count_mismatch"}
         previous = "0" * 64
         expected_sequence = 0
         for row in events:
