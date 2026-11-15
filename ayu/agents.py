@@ -33,6 +33,7 @@ class AgentRunner:
         self.mode = mode
         self.contract = contract or ExecutionContract.for_agent(tools.workspace, mode=mode, remote_context_approved=remote_context_approved)
         self.policy = ExecutionPolicy()
+        self._output_bytes = 0
         self.policy.authorize(self.contract, ("workspace.read",), workspace=tools.workspace)
         if mode == "local":
             self.policy.authorize(self.contract, ("model.inference.local",))
@@ -54,7 +55,8 @@ class AgentRunner:
         if len(output) > MAX_RESPONSE_CHARS:
             raise AgentRunError(f"{actor} response exceeded {MAX_RESPONSE_CHARS} characters.")
         self._model_calls += 1
-        self.policy.check_budget(self.contract, elapsed_seconds=elapsed_since(self._started), model_calls=self._model_calls, tool_calls=self._tool_calls)
+        self._output_bytes += len(output.encode("utf-8"))
+        self.policy.check_budget(self.contract, elapsed_seconds=elapsed_since(self._started), model_calls=self._model_calls, tool_calls=self._tool_calls, output_bytes=self._output_bytes)
         return output.strip()
 
     @staticmethod
@@ -102,6 +104,7 @@ class AgentRunner:
         self._started = __import__('time').monotonic()
         self._model_calls = 0
         self._tool_calls = 0
+        self._output_bytes = 0
         self.policy.check_budget(self.contract, elapsed_seconds=0, tool_calls=max_steps)
         self.store.create_agent_run(run_id, task, self.mode, max_steps, project_id,
             initial_event=("system", "run_started", {"mode": self.mode, "max_steps": max_steps, "execution_contract": self.contract.public_dict()}))
