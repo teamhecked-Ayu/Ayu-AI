@@ -125,6 +125,9 @@ class AgentRunner:
                 self.policy.check_budget(self.contract, elapsed_seconds=elapsed_since(self._started), model_calls=self._model_calls, tool_calls=self._tool_calls)
                 observation = self.tools.invoke(step["tool_id"], step["arguments"])
                 entry = {"step": number, "tool_id": step["tool_id"], "arguments": step["arguments"], "observation": observation}
+                self._output_bytes += len(json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+                self.policy.check_budget(self.contract, elapsed_seconds=elapsed_since(self._started),
+                    model_calls=self._model_calls, tool_calls=self._tool_calls, output_bytes=self._output_bytes)
                 observations.append(entry)
                 self.store.record_agent_event(run_id, sequence, "researcher", "tool_observation", entry)
                 sequence += 1
