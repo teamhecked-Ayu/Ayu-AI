@@ -22,7 +22,7 @@ The `ayu.runtime` module defines structural interfaces:
   local-only status, and optional capabilities. Describing a runtime does not
   contact a server or download a model.
 
-The existing `llama-cli`, `llama-server`, and local-only `ollama` adapters conform to this contract.
+The existing `llama-cli`, `llama-server`, local-only `ollama`, and local-only `vllm` adapters conform to this contract.
 Their transport-specific validation, timeouts, response limits, and model checks
 remain inside their adapters. The coding workflow continues to reject adapters
 that do not implement structured output.
