@@ -415,9 +415,13 @@ class DockerSandboxRunner:
                                     raise SandboxError("Sandbox snapshot grew beyond the 256 MiB total bound while copying.")
                                 out.write(chunk)
                         after = os.fstat(inp.fileno())
+                        metadata_changed = (
+                            after.st_mtime_ns != before.st_mtime_ns
+                            or (os.name != "nt" and after.st_ctime_ns != before.st_ctime_ns)
+                        )
                         if (bytes_this_file != before.st_size or after.st_size != before.st_size
                                 or after.st_ino != before.st_ino or after.st_nlink > 1
-                                or after.st_mtime_ns != before.st_mtime_ns or after.st_ctime_ns != before.st_ctime_ns):
+                                or metadata_changed):
                             raise SandboxError("Workspace file changed during snapshot; refusing an inconsistent copy.")
                         copied_bytes += bytes_this_file
                         executable = 0o111 if (before.st_mode & 0o111) else 0
@@ -581,20 +585,25 @@ class DockerSandboxRunner:
                 timed_out = False
                 cleanup: bool | None = None
                 try:
-                    proc.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    timed_out = True
-                    cleanup = self._remove_container(container_name, config)
-                    self._stop_client(proc)
-                    cleanup = cleanup and self._verify_cleanup(container_name, config)
-                except KeyboardInterrupt:
+                    try:
+                        proc.wait(timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        timed_out = True
+                        cleanup = self._remove_container(container_name, config)
+                        self._stop_client(proc)
+                        cleanup = cleanup and self._verify_cleanup(container_name, config)
+                    # Keep the output-drain joins inside the same interruption
+                    # boundary. An interrupt here must not strand a live container.
+                    for thread in threads:
+                        thread.join(timeout=5)
+                except BaseException:
+                    # Cover KeyboardInterrupt and unexpected wait/join failures.
+                    # Cleanup is exact-name scoped; never enumerate or stop other
+                    # containers. The original exception is re-raised afterwards.
                     cleanup = self._remove_container(container_name, config)
                     self._stop_client(proc)
                     cleanup = cleanup and self._verify_cleanup(container_name, config)
                     raise
-                finally:
-                    for thread in threads:
-                        thread.join(timeout=5)
                 if cleanup is None:
                     cleanup = self._verify_cleanup(container_name, config)
                 out = bytes(stdout).decode("utf-8", errors="replace")

@@ -412,5 +412,33 @@ class SandboxPolicyTests(unittest.TestCase):
         verify.assert_called_once()
 
 
+    def test_unexpected_wait_failure_attempts_container_cleanup(self):
+        runner = self.runner(); runner._docker_path = "/usr/bin/docker"
+        class BrokenProcess:
+            stdout = io.BytesIO(b""); stderr = io.BytesIO(b""); pid = 2_147_483_647
+            returncode = None; waits = 0
+            def poll(self): return self.returncode
+            def terminate(self): self.returncode = -15
+            def kill(self): self.returncode = -9
+            def wait(self, timeout=None):
+                self.waits += 1
+                if self.waits == 1:
+                    raise RuntimeError("unexpected wait failure")
+                self.returncode = -15
+                return self.returncode
+        proc = BrokenProcess()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repo"; root.mkdir(); (root / "tests").mkdir()
+            with patch.object(runner, "preflight", return_value=SandboxPolicy(VALID_IMAGE).public_dict()), \
+                 patch.object(runner, "_remove_container", return_value=True) as remove, \
+                 patch.object(runner, "_verify_cleanup", return_value=True) as verify, \
+                 patch("ayu.sandbox.os.killpg", side_effect=ProcessLookupError, create=True), \
+                 patch("ayu.sandbox.subprocess.Popen", return_value=proc):
+                with self.assertRaisesRegex(RuntimeError, "unexpected wait failure"):
+                    runner.run_tests(root, "pytest", ["tests"], 5, run_id="1234567890abcdef")
+        remove.assert_called_once()
+        verify.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

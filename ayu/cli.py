@@ -86,6 +86,10 @@ def build_parser() -> argparse.ArgumentParser:
     cs.add_parser("validate", help="Validate configuration without contacting providers")
     tools = sub.add_parser("tools", help="Show implemented tool capabilities")
     tools.add_subparsers(dest="tools_command", required=True).add_parser("list", help="List available local tools")
+    audit = sub.add_parser("audit", help="Verify local agent-run audit event integrity")
+    audit_sub = audit.add_subparsers(dest="audit_command", required=True)
+    audit_verify = audit_sub.add_parser("verify", help="Verify the SHA-256 event chain for a run")
+    audit_verify.add_argument("run_id")
     agents = sub.add_parser("agents", help="Run bounded model-mediated agent workflows and inspect their audit records")
     ag = agents.add_subparsers(dest="agents_command", required=True)
     ag.add_parser("roles", help="List the fixed sequential agent roles")
@@ -351,6 +355,7 @@ def run_agent(store: Store, settings: Settings, args: argparse.Namespace) -> int
             print("Agent run not found.", file=sys.stderr)
             return 1
         events = store.list_agent_events(args.run_id)
+        run["audit_integrity"] = store.verify_agent_event_integrity(args.run_id)
         run["events"] = []
         for event in events:
             payload = json.loads(event.pop("payload_json"))
@@ -379,7 +384,7 @@ def run_agent(store: Store, settings: Settings, args: argparse.Namespace) -> int
         if not 1 <= args.max_steps <= 4: raise ToolError("--max-steps must be between 1 and 4.")
         tools = ToolRegistry(workspace)
         provider = build_local_provider(settings) if mode == "local" else build_remote_provider(settings)
-        runner = AgentRunner(provider, store, tools, mode=mode)
+        runner = AgentRunner(provider, store, tools, mode=mode, remote_context_approved=(mode == "remote" and args.allow_remote_context))
         result = runner.run(" ".join(args.task), max_steps=args.max_steps, project_id=project_id)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
@@ -396,10 +401,11 @@ def run_coding(store: Store, settings: Settings, args: argparse.Namespace) -> in
         if run is None:
             print("Coding run not found.", file=sys.stderr); return 1
         events = []
+        audit_integrity = store.verify_agent_event_integrity(args.run_id)
         for event in store.list_agent_events(args.run_id):
             payload = json.loads(event.pop("payload_json"))
             events.append({**event, "payload": payload})
-        print(json.dumps({"run": run, "events": events}, ensure_ascii=False, indent=2))
+        print(json.dumps({"run": run, "audit_integrity": audit_integrity, "events": events}, ensure_ascii=False, indent=2))
         return 0
     if args.code_command == "recover":
         try:
@@ -657,6 +663,11 @@ def main(argv: list[str] | None = None) -> int:
             metadata = ToolRegistry(Path(temporary)).list_tools()
         print(json.dumps({"tools":metadata,"policy":"Read-only; explicit workspace required; no shell, file modification, or network tools."},indent=2))
         return 0
+    if cmd == "audit":
+        if args.audit_command == "verify":
+            result = store.verify_agent_event_integrity(args.run_id)
+            print(json.dumps({"run_id": args.run_id, **result}, ensure_ascii=False, indent=2))
+            return 0 if result.get("valid") else 1
     if cmd == "agents": return run_agent(store, settings, args)
     if cmd == "news":
         if settings.mode == "basic":

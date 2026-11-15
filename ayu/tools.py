@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 
+from .execution import ExecutionContract, ExecutionPolicy, ExecutionPolicyError
+
 TEXT_SUFFIXES = {
     ".txt", ".md", ".rst", ".py", ".pyi", ".toml", ".ini", ".cfg",
     ".json", ".yaml", ".yml", ".csv", ".tsv", ".html", ".css",
@@ -50,7 +52,7 @@ class ToolDefinition:
 class ToolRegistry:
     """A fixed allow-list of bounded read-only tools under one workspace."""
 
-    def __init__(self, workspace: Path, *, max_files: int = 200, max_total_bytes: int = 5 * 1024 * 1024):
+    def __init__(self, workspace: Path, *, max_files: int = 200, max_total_bytes: int = 5 * 1024 * 1024, contract: ExecutionContract | None = None):
         try:
             root = workspace.expanduser().resolve(strict=True)
         except OSError as exc:
@@ -62,6 +64,8 @@ class ToolRegistry:
         self.workspace = root
         self.max_files = max_files
         self.max_total_bytes = max_total_bytes
+        self.contract = contract
+        self.policy = ExecutionPolicy()
         self._tools = {
             "search_text": ToolDefinition(
                 tool_id="search_text",
@@ -87,6 +91,11 @@ class ToolRegistry:
         if tool is None:
             raise ToolError(f"Tool is not allow-listed: {tool_id!r}")
         self._validate_arguments(tool, arguments)
+        if self.contract is not None:
+            try:
+                self.policy.authorize(self.contract, tool.required_permissions, workspace=self.workspace)
+            except ExecutionPolicyError as exc:
+                raise ToolError(str(exc)) from None
         started = time.monotonic()
         result = tool.handler(arguments)
         if time.monotonic() - started > tool.timeout_seconds:

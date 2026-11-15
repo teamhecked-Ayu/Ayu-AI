@@ -19,6 +19,7 @@ from typing import Any
 from .store import Store
 from .tools import DENIED_DIRS, DENIED_NAMES, DENIED_SUFFIXES, TEXT_SUFFIXES, ToolError, ToolRegistry
 from .sandbox import DockerSandboxRunner, SandboxError
+from .execution import ExecutionContract, ExecutionPolicy, elapsed_since
 
 MAX_JSON_CHARS = 32_000
 MAX_DIFF_CHARS = 8_000
@@ -263,9 +264,17 @@ class CodingRunner:
         self.provider, self.store, self.mode = provider, store, mode
         self.sandbox = sandbox_runner or DockerSandboxRunner.from_environment()
         self.calls = 0
+        self.contract: ExecutionContract | None = None
+        self.policy = ExecutionPolicy()
+        self.started_at = time.monotonic()
+        self.process_invocations = 0
+        self.output_bytes = 0
 
     def _ask(self, system: str, user: str, *, schema: dict[str, Any], schema_name: str) -> str:
         self.calls += 1
+        if self.contract is not None:
+            self.policy.authorize(self.contract, ("model.inference.local",))
+            self.policy.check_budget(self.contract, elapsed_seconds=elapsed_since(self.started_at), model_calls=self.calls, process_invocations=self.process_invocations)
         if self.calls > 5:
             raise CodeRunError("Coding run exceeded its five-model-call budget.")
         if len(user) > MAX_JSON_CHARS:
@@ -279,6 +288,9 @@ class CodingRunner:
             raise CodeRunError(f"Local model request failed ({type(exc).__name__}); no remote fallback was attempted.") from None
         if not isinstance(result, str) or not result.strip() or len(result) > 24_000:
             raise CodeRunError("Local model returned empty or oversized coding output.")
+        if self.contract is not None:
+            self.output_bytes += len(result.encode("utf-8"))
+            self.policy.check_budget(self.contract, elapsed_seconds=elapsed_since(self.started_at), model_calls=self.calls, process_invocations=self.process_invocations, output_bytes=self.output_bytes)
         return result.strip()
 
     @staticmethod
@@ -451,6 +463,10 @@ class CodingRunner:
         head = self._git(workspace, "rev-parse", "HEAD").stdout.strip()
         if not re.fullmatch(r"[0-9a-fA-F]{40,64}", head): raise CodeRunError("Could not verify the base Git commit.")
         run_id = uuid.uuid4().hex
+        self.started_at = time.monotonic()
+        self.calls = 0
+        self.process_invocations = 0
+        self.output_bytes = 0
         branch = "ayu/task/" + run_id[:16]
         run_root = Path(tempfile.gettempdir()) / f"ayu-code-{run_id[:8]}-{run_id[8:20]}"
         worktree = run_root / "workspace"
@@ -476,6 +492,9 @@ class CodingRunner:
             event("worktree_preparing", {"workspace": str(workspace), "worktree": str(worktree), "branch": branch, "base_commit": head})
             self._git(workspace, "-c", f"core.hooksPath={hooks}", "worktree", "add", "-b", branch, str(worktree), head, timeout=30)
             event("worktree_created", {"workspace": str(workspace), "worktree": str(worktree), "branch": branch, "base_commit": head, "sandbox_required": True, "sandbox_policy_version": sandbox_policy.get("policy_version")})
+            self.contract = ExecutionContract.for_coding(worktree, sandbox_policy)
+            self.policy.authorize(self.contract, ("workspace.read", "workspace.write.task_worktree", "model.inference.local"), workspace=worktree)
+            event("execution_contract", self.contract.public_dict())
             inventory = self._inventory(worktree)
             plan_raw = self._ask(PLAN_SYSTEM, "Task (untrusted):\n"+task+"\n\nTracked text-file inventory (paths only):\n"+"\n".join(inventory)+"\n\nCreate a concise plan and list relevant files. For behavior changes, include implementation source; do not select tests alone if relevant source is available.", schema=_planner_schema(inventory), schema_name="ayu_code_plan")
             plan = self._json(plan_raw, "Planner", {"files_to_read", "success_criteria", "risk_notes"})
@@ -503,9 +522,13 @@ class CodingRunner:
             summary, edits = self._parse_edits(edit_raw)
             if any(edit["path"] not in editable or not edit["old_text"] for edit in edits):
                 raise CodeRunError("Implementer edits must target inspected existing implementation files with non-empty exact context.")
+            self.policy.authorize(self.contract, ("workspace.write.task_worktree",), workspace=worktree)
             changes = apply_edits(worktree, edits, hashes)
             changed = [item["path"] for item in changes]
             event("files_edited", {"summary": summary, "changes": changes})
+            self.policy.authorize(self.contract, ("process.execute.sandbox",), workspace=worktree)
+            self.process_invocations += 1
+            self.policy.check_budget(self.contract, elapsed_seconds=elapsed_since(self.started_at), model_calls=self.calls, process_invocations=self.process_invocations)
             test_result = self.sandbox.run_tests(
                 worktree, suite, test_paths or [], timeout, run_id=run_id,
                 on_start=lambda details: event("sandbox_container_starting", details),
@@ -520,9 +543,13 @@ class CodingRunner:
                 correction_summary, correction = self._parse_edits(correction_raw)
                 if any(edit["path"] not in editable or not edit["old_text"] for edit in correction):
                     raise CodeRunError("Correction edits must target inspected existing implementation files with non-empty exact context.")
+                self.policy.authorize(self.contract, ("workspace.write.task_worktree",), workspace=worktree)
                 correction_changes = apply_edits(worktree, correction, current_hashes)
                 changed = list(dict.fromkeys(changed + [item["path"] for item in correction_changes]))
                 event("correction", {"summary": correction_summary, "changes": correction_changes})
+                self.policy.authorize(self.contract, ("process.execute.sandbox",), workspace=worktree)
+                self.process_invocations += 1
+                self.policy.check_budget(self.contract, elapsed_seconds=elapsed_since(self.started_at), model_calls=self.calls, process_invocations=self.process_invocations)
                 test_result = self.sandbox.run_tests(
                     worktree, suite, test_paths or [], timeout, run_id=run_id,
                     on_start=lambda details: event("sandbox_container_starting", details),

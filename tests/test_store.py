@@ -84,6 +84,95 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(OSError,"symbolic link"):
             Store(alias)
 
+    def test_audit_verification_rejects_missing_run(self):
+        result = self.store.verify_agent_event_integrity("missing-run")
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason"], "run_not_found")
+
+    def test_audit_verification_rejects_run_without_events(self):
+        self.store.create_agent_run("empty-audit-run", "empty audit", "local", 2)
+        result = self.store.verify_agent_event_integrity("empty-audit-run")
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason"], "no_events")
+
+    def test_agent_event_hash_chain_verifies_and_detects_tampering(self):
+        run_id = "audit-chain-test"
+        self.store.create_agent_run(
+            run_id, "verify audit", "local", 2,
+            initial_event=("system", "run_started", {"contract": "test"}),
+        )
+        self.store.record_agent_event(run_id, 1, "planner", "plan", {"steps": []})
+        valid = self.store.verify_agent_event_integrity(run_id)
+        self.assertTrue(valid["valid"])
+        self.assertEqual(valid["events_checked"], 2)
+        with self.store.connect() as db:
+            db.execute(
+                "UPDATE agent_events SET payload_json=? WHERE run_id=? AND sequence=1",
+                ('{"steps":[{"tool":"tampered"}]}', run_id),
+            )
+        invalid = self.store.verify_agent_event_integrity(run_id)
+        self.assertFalse(invalid["valid"])
+        self.assertEqual(invalid["reason"], "event_hash_mismatch")
+
+    def test_agent_event_sequence_must_be_contiguous(self):
+        run_id = "audit-sequence-test"
+        self.store.create_agent_run(
+            run_id, "verify sequence", "local", 2,
+            initial_event=("system", "run_started", {}),
+        )
+        with self.assertRaisesRegex(ValueError, "contiguous"):
+            self.store.record_agent_event(run_id, 2, "planner", "plan", {})
+
+
+    def test_agent_event_deletion_without_integrity_record_is_detected(self):
+        run_id = "audit-deletion-test"
+        self.store.create_agent_run(
+            run_id, "verify deletion", "local", 2,
+            initial_event=("system", "run_started", {}),
+        )
+        self.store.record_agent_event(run_id, 1, "planner", "plan", {"steps": []})
+        with self.store.connect() as db:
+            db.execute("DELETE FROM agent_events WHERE run_id=? AND sequence=1", (run_id,))
+        result = self.store.verify_agent_event_integrity(run_id)
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason"], "event_integrity_count_mismatch")
+
+
+    def test_partial_audit_chain_is_not_auto_repaired_on_reopen(self):
+        run_id = "audit-partial-chain-test"
+        self.store.create_agent_run(
+            run_id, "detect partial chain", "local", 2,
+            initial_event=("system", "run_started", {}),
+        )
+        self.store.record_agent_event(run_id, 1, "planner", "plan", {"steps": []})
+        with self.store.connect() as db:
+            db.execute(
+                "UPDATE agent_events SET payload_json=? WHERE run_id=? AND sequence=1",
+                ('{"steps":[{"tampered":true}]}', run_id),
+            )
+            db.execute(
+                "DELETE FROM agent_event_integrity WHERE run_id=? AND sequence=1",
+                (run_id,),
+            )
+        reopened = Store(self.store.path)
+        result = reopened.verify_agent_event_integrity(run_id)
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason"], "event_integrity_count_mismatch")
+
+    def test_legacy_run_with_no_integrity_rows_is_backfilled(self):
+        run_id = "legacy-audit-run"
+        self.store.create_agent_run(run_id, "legacy run", "local", 2)
+        with self.store.connect() as db:
+            db.execute(
+                "INSERT INTO agent_events(run_id,sequence,actor,event_type,payload_json,created_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (run_id, 0, "system", "run_started", "{}", "2025-01-01T00:00:00+00:00"),
+            )
+        reopened = Store(self.store.path)
+        result = reopened.verify_agent_event_integrity(run_id)
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["events_checked"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

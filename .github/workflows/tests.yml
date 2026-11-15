@@ -49,3 +49,24 @@ jobs:
         run: ayu test --ayulm-smoke
       - name: Run complete suite with model tests enabled
         run: python -m pytest -q
+
+  docker-runtime-integration:
+    name: Real Docker sandbox boundary
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      AYU_TEST_SANDBOX_IMAGE: python:3.12-slim-trixie@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Confirm local Docker Engine is available
+        run: docker info
+      - name: Load the digest-pinned official Python test image
+        run: docker pull "$AYU_TEST_SANDBOX_IMAGE"
+      - name: Run real Docker boundary and cleanup tests
+        run: python -m pytest -q tests/test_sandbox_integration.py
