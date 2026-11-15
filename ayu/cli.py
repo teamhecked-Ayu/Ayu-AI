@@ -191,7 +191,7 @@ def run_chat(store: Store, settings: Settings, args: argparse.Namespace) -> int:
         context = lexical_context(store, text) if settings.memory_enabled else ""
         if context: msgs.append({"role":"system","content":context})
         msgs.extend(store.history(session_id))
-        if isinstance(provider,LlamaServerProvider):
+        if callable(getattr(provider, "stream_complete", None)):
             pieces=[]
             print("Ayu: ",end="",flush=True)
             stream=provider.stream_complete(msgs)
