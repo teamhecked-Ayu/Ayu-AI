@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ayu.provider import LlamaCppProvider, LlamaServerProvider, OllamaProvider
+from ayu.provider import LlamaCppProvider, LlamaServerProvider, OllamaProvider, VLLMProvider
 from ayu.runtime import ChatRuntime, StructuredOutputRuntime, StreamingRuntime, describe_runtime
 from ayu.settings import Settings
 
@@ -57,5 +57,18 @@ def test_ollama_conforms_to_chat_streaming_and_structured_runtime_contracts():
     assert descriptor.backend == "ollama"
     assert descriptor.locality == "local"
     assert descriptor.configured_model_identity == "qwen2.5:7b"
+    assert descriptor.supports_streaming is True
+    assert descriptor.supports_structured_output is True
+
+
+def test_vllm_conforms_to_common_runtime_contracts():
+    provider = VLLMProvider(settings(local_model_id="Qwen/Qwen2.5-7B-Instruct"))
+    assert isinstance(provider, ChatRuntime)
+    assert isinstance(provider, StructuredOutputRuntime)
+    assert isinstance(provider, StreamingRuntime)
+    descriptor = describe_runtime(provider)
+    assert descriptor.backend == "vllm"
+    assert descriptor.locality == "local"
+    assert descriptor.configured_model_identity == "Qwen/Qwen2.5-7B-Instruct"
     assert descriptor.supports_streaming is True
     assert descriptor.supports_structured_output is True
