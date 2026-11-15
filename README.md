@@ -5,7 +5,7 @@ Ayu AI is a terminal-first, local-first software foundation. It is useful withou
 ## Operating modes and optional services
 
 - **Basic:** local CLI, SQLite conversation/memory/project/task records, configuration checks, and bounded lexical text search. It does not pretend to provide LLM reasoning.
-- **Local inference:** an explicitly selected, already-installed llama.cpp or Ollama runtime. The `llama-server` backend verifies the loaded GGUF path and effective token/context budget; `llama-cli` remains for backward compatibility; Ollama uses its native local chat API and exact installed model-name selection. Ayu does not pull/download weights or contact an AI provider in local mode.
+- **Local inference:** an explicitly selected, already-installed llama.cpp, Ollama, or vLLM runtime. The `llama-server` backend verifies the loaded GGUF path and effective token/context budget; `llama-cli` remains for backward compatibility; Ollama uses its native local chat API and exact installed model-name selection. Ayu does not pull/download weights or contact an AI provider in local mode.
 - **Remote inference:** explicitly selected OpenAI, Anthropic, or OpenAI-compatible adapter. Remote calls require credentials/model configuration and an explicit remote chat/agent command (or `AYU_MODE=remote`); there is no fallback between providers.
 - **NewsAPI:** optional article-metadata search, independent from AI inference. It is disabled unless `AYU_NEWSAPI_ENABLED=true`, a NewsAPI key is configured, and the command includes `--allow-network`. Results are untrusted external metadata and are not automatically sent to an AI provider.
 - **AyuLM research:** native byte-level training, held-out validation, checkpoint/resume, evaluation, generation, and local throughput benchmark. PyTorch is optional. A model trained from scratch on a tiny corpus is not a conversational assistant.
@@ -221,6 +221,21 @@ ayu news search "climate policy" --from-date 2026-01-01 --sort-by relevancy --li
 ```
 
 The NewsAPI key is sent only to the fixed NewsAPI HTTPS endpoint in its API-key header. Article descriptions/URLs remain untrusted; verify them at the cited source. Respect the service's terms and rate limits. No live API call was made during development.
+
+## Local vLLM inference
+
+Ayu can connect to a separately started local vLLM OpenAI-compatible server without an API key. Bind the server to loopback (for example, `127.0.0.1`) and configure:
+
+```sh
+export AYU_MODE=local
+export AYU_LOCAL_BACKEND=vllm
+export AYU_VLLM_URL=http://127.0.0.1:8000
+export AYU_LOCAL_MODEL_ID='Qwen/Qwen2.5-7B-Instruct'  # exact ID from /v1/models
+ayu models verify
+ayu models verify --infer  # sends a real local generation request
+```
+
+Ayu accepts only numeric loopback addresses, checks the exact served model ID, bounds request/response sizes, enforces timeouts, and never downloads weights or falls back to a remote provider. Streaming uses server-sent events. Structured coding output uses the OpenAI-compatible JSON Schema response format; support depends on the installed vLLM version and guided-decoding configuration. Mocked adapter tests do not prove a live server, GPU availability, model quality, or schema-decoding compatibility.
 
 ## Bounded read-only agent workflow
 
