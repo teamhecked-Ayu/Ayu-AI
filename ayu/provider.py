@@ -579,9 +579,239 @@ class LlamaServerProvider:
             connection.close()
 
 
-def build_local_provider(settings: Settings) -> LlamaCppProvider | LlamaServerProvider:
+
+class OllamaProvider:
+    """Local-only Ollama chat adapter; model pulls are never initiated by Ayu."""
+
+    runtime_name = "ollama"
+    MAX_REQUEST_BYTES = 2 * 1024 * 1024
+    MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+    MAX_NDJSON_LINE_BYTES = 1024 * 1024
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.last_runtime_info: dict[str, str] = {}
+
+    def _endpoint(self) -> tuple[str, int]:
+        try:
+            endpoint = urlsplit(self.settings.ollama_url)
+            host = endpoint.hostname
+            port = endpoint.port
+        except ValueError:
+            raise ProviderError("AYU_OLLAMA_URL is not a valid loopback URL.") from None
+        if port is None:
+            port = 80
+        if (endpoint.scheme != "http" or not host or endpoint.username or endpoint.password
+                or endpoint.query or endpoint.fragment or endpoint.path not in {"", "/"}):
+            raise ProviderError("AYU_OLLAMA_URL must be plain HTTP to a numeric loopback IP, without credentials, path, query, or fragment.")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            raise ProviderError("AYU_OLLAMA_URL must use a numeric loopback IP such as 127.0.0.1 or ::1; hostnames and remote addresses are refused.") from None
+        if isinstance(address, ipaddress.IPv6Address) and address.scope_id is not None:
+            raise ProviderError("Scoped IPv6 addresses are not accepted for the local Ollama URL.")
+        if not address.is_loopback:
+            raise ProviderError("Ollama connections are restricted to loopback addresses; no remote fallback or network request was attempted.")
+        if not 1 <= port <= 65535:
+            raise ProviderError("AYU_OLLAMA_URL port must be between 1 and 65535.")
+        if not 1 <= self.settings.local_timeout <= 3600:
+            raise ProviderError("AYU_LOCAL_TIMEOUT must be between 1 and 3600 seconds.")
+        return address.compressed, port
+
+    def _request(self, method: str, path: str, payload: dict | None = None) -> bytes:
+        host, port = self._endpoint()
+        body = None
+        if payload is not None:
+            try:
+                body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            except (TypeError, ValueError, UnicodeError):
+                raise ProviderError("Could not encode a local Ollama request.") from None
+            if len(body) > self.MAX_REQUEST_BYTES:
+                raise ProviderError("Local Ollama request exceeded the 2 MiB safety limit.")
+        connection = http.client.HTTPConnection(host, port, timeout=self.settings.local_timeout)
+        try:
+            headers = {"Accept": "application/json", "User-Agent": "ayu-ai/0.4.0"}
+            if body is not None:
+                headers["Content-Type"] = "application/json"
+            connection.request(method, path, body=body, headers=headers)
+            response = connection.getresponse()
+            if response.status != 200:
+                raise ProviderError(f"Local Ollama returned HTTP {response.status} for {path}; response body suppressed.")
+            raw = response.read(self.MAX_RESPONSE_BYTES + 1)
+            if len(raw) > self.MAX_RESPONSE_BYTES:
+                raise ProviderError("Local Ollama response exceeded the 8 MiB safety limit.")
+            return raw
+        except ProviderError:
+            raise
+        except (TimeoutError, socket.timeout):
+            raise ProviderError(f"Local Ollama request exceeded {self.settings.local_timeout:g} seconds.") from None
+        except (OSError, http.client.HTTPException):
+            raise ProviderError("Could not connect to the configured local Ollama runtime; details suppressed.") from None
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _json(raw: bytes, label: str) -> dict:
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError, RecursionError):
+            raise ProviderError(f"Local Ollama returned invalid {label} JSON; body suppressed.") from None
+        if not isinstance(value, dict):
+            raise ProviderError(f"Local Ollama returned an invalid {label} response.")
+        return value
+
+    def validate(self) -> str:
+        listing = self._json(self._request("GET", "/api/tags"), "model-list")
+        models = listing.get("models")
+        if not isinstance(models, list):
+            raise ProviderError("Local Ollama did not return a valid model list.")
+        entries = [item for item in models if isinstance(item, dict)
+                   and isinstance(item.get("name"), str) and item["name"]]
+        configured = self.settings.local_model_id
+        if configured:
+            selected = [item for item in entries if item["name"] == configured]
+            if len(selected) != 1:
+                raise ProviderError("AYU_LOCAL_MODEL_ID must exactly match one model name reported by local Ollama; Ayu will not pull or download a model.")
+        elif len(entries) == 1:
+            selected = entries
+        elif not entries:
+            raise ProviderError("No local Ollama models are installed. Install a model separately; Ayu does not download model weights.")
+        else:
+            raise ProviderError("Ollama reports multiple installed models; set AYU_LOCAL_MODEL_ID to an exact model name.")
+        digest = selected[0].get("digest")
+        self.last_runtime_info = {
+            "model_id": selected[0]["name"],
+            "digest": digest if isinstance(digest, str) else "not reported",
+        }
+        return selected[0]["name"]
+
+    def _checked_messages(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
+        limit = self.settings.local_max_input_chars
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1_000_000:
+            raise ProviderError("AYU_LOCAL_MAX_INPUT_CHARS must be between 1 and 1000000.")
+        if not isinstance(messages, list) or not messages or len(messages) > 100:
+            raise ProviderError("Local chat requires between 1 and 100 messages.")
+        clean = []
+        total_chars = 0
+        for item in messages:
+            if not isinstance(item, dict) or set(item) != {"role", "content"}:
+                raise ProviderError("Local chat messages must contain only role and content fields.")
+            role, content = item["role"], item["content"]
+            if not isinstance(role, str) or role not in {"system", "user", "assistant"} or not isinstance(content, str):
+                raise ProviderError("Local chat supports only system, user, and assistant text messages.")
+            total_chars += len(content)
+            if total_chars > limit:
+                raise ProviderError(f"Local chat exceeds AYU_LOCAL_MAX_INPUT_CHARS ({limit}); shorten the prompt or reduce saved history.")
+            clean.append({"role": role, "content": content})
+        return clean
+
+    def _chat_payload(self, messages: list[dict[str, str]]) -> dict:
+        if (isinstance(self.settings.max_output_tokens, bool)
+                or not isinstance(self.settings.max_output_tokens, int)
+                or not 1 <= self.settings.max_output_tokens <= 8192):
+            raise ProviderError("AYU_MAX_OUTPUT_TOKENS must be between 1 and 8192.")
+        return {
+            "model": self.validate(),
+            "messages": self._checked_messages(messages),
+            "stream": False,
+            "options": {"num_predict": self.settings.max_output_tokens},
+        }
+
+    def complete(self, messages: list[dict[str, str]]) -> str:
+        payload = self._chat_payload(messages)
+        result = self._json(self._request("POST", "/api/chat", payload), "chat")
+        message = result.get("message")
+        answer = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(answer, str) or not answer.strip():
+            raise ProviderError("Local Ollama returned no text completion.")
+        return answer.strip()
+
+    def complete_structured(self, messages: list[dict[str, str]], schema: dict, *, schema_name: str) -> str:
+        if (not isinstance(schema_name, str) or not schema_name or len(schema_name) > 64
+                or not schema_name[0].isalpha()
+                or any(not (char.isalnum() or char == "_") for char in schema_name)):
+            raise ProviderError("Local structured-output schema name is invalid.")
+        if not isinstance(schema, dict):
+            raise ProviderError("Local structured output requires a JSON Schema object.")
+        try:
+            schema_bytes = json.dumps(schema, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError):
+            raise ProviderError("Local structured-output schema is not serializable JSON.") from None
+        if len(schema_bytes) > 128 * 1024:
+            raise ProviderError("Local structured-output schema exceeded the 128 KiB limit.")
+        payload = self._chat_payload(messages)
+        payload["format"] = schema
+        result = self._json(self._request("POST", "/api/chat", payload), "structured chat")
+        message = result.get("message")
+        answer = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(answer, str) or not answer.strip():
+            raise ProviderError("Local Ollama returned no structured text.")
+        return answer.strip()
+
+    def stream_complete(self, messages: list[dict[str, str]]) -> Iterator[str]:
+        payload = self._chat_payload(messages)
+        payload["stream"] = True
+        host, port = self._endpoint()
+        try:
+            body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError):
+            raise ProviderError("Could not encode a local Ollama streaming request.") from None
+        if len(body) > self.MAX_REQUEST_BYTES:
+            raise ProviderError("Local Ollama request exceeded the 2 MiB safety limit.")
+        connection = http.client.HTTPConnection(host, port, timeout=self.settings.local_timeout)
+        received_text = False
+        total_bytes = 0
+        deadline = time.monotonic() + self.settings.local_timeout
+        try:
+            connection.request("POST", "/api/chat", body=body,
+                               headers={"Accept": "application/x-ndjson, application/json",
+                                        "Content-Type": "application/json",
+                                        "User-Agent": "ayu-ai/0.4.0"})
+            response = connection.getresponse()
+            if response.status != 200:
+                raise ProviderError(f"Local Ollama returned HTTP {response.status} for /api/chat; response body suppressed.")
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ProviderError(f"Local Ollama stream exceeded {self.settings.local_timeout:g} seconds.")
+                if connection.sock is not None:
+                    connection.sock.settimeout(remaining)
+                line = response.readline(self.MAX_NDJSON_LINE_BYTES + 1)
+                if not line:
+                    break
+                total_bytes += len(line)
+                if len(line) > self.MAX_NDJSON_LINE_BYTES or total_bytes > self.MAX_RESPONSE_BYTES:
+                    raise ProviderError("Local Ollama streaming response exceeded its safety limit.")
+                try:
+                    event = json.loads(line.decode("utf-8"))
+                except (UnicodeError, json.JSONDecodeError, RecursionError):
+                    raise ProviderError("Local Ollama returned malformed streaming data; body suppressed.") from None
+                if not isinstance(event, dict):
+                    raise ProviderError("Local Ollama returned an invalid streaming event.")
+                message = event.get("message")
+                content = message.get("content") if isinstance(message, dict) else None
+                if isinstance(content, str) and content:
+                    received_text = True
+                    yield content
+                if event.get("done") is True:
+                    break
+            if not received_text:
+                raise ProviderError("Local Ollama stream ended without generated text.")
+        except ProviderError:
+            raise
+        except (TimeoutError, socket.timeout):
+            raise ProviderError(f"Local Ollama stream exceeded {self.settings.local_timeout:g} seconds.") from None
+        except (OSError, http.client.HTTPException):
+            raise ProviderError("Local Ollama streaming connection failed; details suppressed.") from None
+        finally:
+            connection.close()
+
+
+def build_local_provider(settings: Settings) -> LlamaCppProvider | LlamaServerProvider | OllamaProvider:
+    if settings.local_backend == "ollama":
+        return OllamaProvider(settings)
     if settings.local_backend == "llama-server":
         return LlamaServerProvider(settings)
     if settings.local_backend != "llama-cli":
-        raise ProviderError("AYU_LOCAL_BACKEND must be llama-cli or llama-server.")
+        raise ProviderError("AYU_LOCAL_BACKEND must be llama-cli, llama-server, or ollama.")
     return LlamaCppProvider(settings)
