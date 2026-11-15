@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ayu.provider import LlamaCppProvider, LlamaServerProvider
+from ayu.provider import LlamaCppProvider, LlamaServerProvider, OllamaProvider
 from ayu.runtime import ChatRuntime, StructuredOutputRuntime, StreamingRuntime, describe_runtime
 from ayu.settings import Settings
 
@@ -46,3 +46,16 @@ def test_runtime_description_does_not_require_server_probe_or_model_download():
     descriptor = describe_runtime(provider)
     assert descriptor.backend == "llama-server"
     assert descriptor.configured_model_identity.endswith("example.gguf")
+
+
+def test_ollama_conforms_to_chat_streaming_and_structured_runtime_contracts():
+    provider = OllamaProvider(settings(local_model_id="qwen2.5:7b"))
+    assert isinstance(provider, ChatRuntime)
+    assert isinstance(provider, StructuredOutputRuntime)
+    assert isinstance(provider, StreamingRuntime)
+    descriptor = describe_runtime(provider)
+    assert descriptor.backend == "ollama"
+    assert descriptor.locality == "local"
+    assert descriptor.configured_model_identity == "qwen2.5:7b"
+    assert descriptor.supports_streaming is True
+    assert descriptor.supports_structured_output is True
