@@ -148,33 +148,37 @@ class Store:
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def _backfill_agent_event_integrity(self) -> None:
-        """Add a verifiable hash chain to legacy events without rewriting event content."""
+        """Backfill only legacy runs with no integrity records; never heal partial chains."""
         with self.connect() as db:
-            rows = db.execute(
-                "SELECT e.run_id,e.sequence,e.actor,e.event_type,e.payload_json,e.created_at "
-                "FROM agent_events e LEFT JOIN agent_event_integrity i "
-                "ON i.run_id=e.run_id AND i.sequence=e.sequence "
-                "WHERE i.run_id IS NULL ORDER BY e.run_id,e.sequence"
+            legacy_runs = db.execute(
+                "SELECT e.run_id FROM agent_events e "
+                "LEFT JOIN agent_event_integrity i ON i.run_id=e.run_id "
+                "GROUP BY e.run_id HAVING COUNT(i.sequence)=0 ORDER BY e.run_id"
             ).fetchall()
-            previous_by_run: dict[str, str] = {}
-            for row in rows:
-                run_id = row["run_id"]
-                previous = previous_by_run.get(run_id)
-                if previous is None:
-                    prior = db.execute(
-                        "SELECT event_hash FROM agent_event_integrity WHERE run_id=? AND sequence<? ORDER BY sequence DESC LIMIT 1",
-                        (run_id, row["sequence"]),
-                    ).fetchone()
-                    previous = prior["event_hash"] if prior else "0" * 64
-                digest = self._event_digest(
-                    run_id, row["sequence"], row["actor"], row["event_type"],
-                    row["payload_json"], row["created_at"], previous,
-                )
-                db.execute(
-                    "INSERT INTO agent_event_integrity(run_id,sequence,previous_hash,event_hash) VALUES(?,?,?,?)",
-                    (run_id, row["sequence"], previous, digest),
-                )
-                previous_by_run[run_id] = digest
+            for run in legacy_runs:
+                run_id = run["run_id"]
+                rows = db.execute(
+                    "SELECT run_id,sequence,actor,event_type,payload_json,created_at "
+                    "FROM agent_events WHERE run_id=? ORDER BY sequence", (run_id,)
+                ).fetchall()
+                previous = "0" * 64
+                expected_sequence = 0
+                for row in rows:
+                    if row["sequence"] != expected_sequence:
+                        # Preserve malformed legacy history as unverifiable instead of
+                        # manufacturing a chain across missing sequence numbers.
+                        break
+                    digest = self._event_digest(
+                        run_id, row["sequence"], row["actor"], row["event_type"],
+                        row["payload_json"], row["created_at"], previous,
+                    )
+                    db.execute(
+                        "INSERT INTO agent_event_integrity(run_id,sequence,previous_hash,event_hash) VALUES(?,?,?,?)",
+                        (run_id, row["sequence"], previous, digest),
+                    )
+                    previous = digest
+                    expected_sequence += 1
+
 
     def verify_agent_event_integrity(self, run_id: str) -> dict[str, object]:
         """Verify event sequence and SHA-256 chain; this detects edits, not privileged deletion."""
