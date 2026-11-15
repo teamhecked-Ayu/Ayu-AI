@@ -61,6 +61,8 @@ class ExecutionContractTests(unittest.TestCase):
             self.policy.check_budget(contract, elapsed_seconds=1, tool_calls=3)
         with self.assertRaisesRegex(ExecutionPolicyError, "wall-clock budget"):
             self.policy.check_budget(contract, elapsed_seconds=181)
+        with self.assertRaisesRegex(ExecutionPolicyError, "model-output budget"):
+            self.policy.check_budget(contract, elapsed_seconds=1, output_bytes=64 * 1024 + 1)
 
     def test_contract_is_immutable(self):
         contract = ExecutionContract.for_agent(self.workspace, mode="local")
