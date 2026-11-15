@@ -429,10 +429,10 @@ class SandboxPolicyTests(unittest.TestCase):
         proc = BrokenProcess()
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "repo"; root.mkdir(); (root / "tests").mkdir()
-            with patch.object(runner, "preflight", return_value=SandboxPolicy(VALID_IMAGE).public_dict()), \\
-                 patch.object(runner, "_remove_container", return_value=True) as remove, \\
-                 patch.object(runner, "_verify_cleanup", return_value=True) as verify, \\
-                 patch("ayu.sandbox.os.killpg", side_effect=ProcessLookupError, create=True), \\
+            with patch.object(runner, "preflight", return_value=SandboxPolicy(VALID_IMAGE).public_dict()), \
+                 patch.object(runner, "_remove_container", return_value=True) as remove, \
+                 patch.object(runner, "_verify_cleanup", return_value=True) as verify, \
+                 patch("ayu.sandbox.os.killpg", side_effect=ProcessLookupError, create=True), \
                  patch("ayu.sandbox.subprocess.Popen", return_value=proc):
                 with self.assertRaisesRegex(RuntimeError, "unexpected wait failure"):
                     runner.run_tests(root, "pytest", ["tests"], 5, run_id="1234567890abcdef")
