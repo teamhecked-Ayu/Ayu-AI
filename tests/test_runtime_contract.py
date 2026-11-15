@@ -23,7 +23,7 @@ def test_llama_cli_conforms_to_minimum_chat_runtime_contract():
     descriptor = describe_runtime(provider)
     assert descriptor.backend == "llama-cli"
     assert descriptor.locality == "local"
-    assert descriptor.model_identity == "/models/example.gguf"
+    assert descriptor.configured_model_identity.endswith("example.gguf")
     assert descriptor.supports_streaming is False
     assert descriptor.supports_structured_output is False
 
@@ -36,7 +36,7 @@ def test_llama_server_exposes_optional_runtime_capabilities():
     descriptor = describe_runtime(provider)
     assert descriptor.backend == "llama-server"
     assert descriptor.locality == "local"
-    assert descriptor.model_identity == "qwen-local"
+    assert descriptor.configured_model_identity == "qwen-local"
     assert descriptor.supports_streaming is True
     assert descriptor.supports_structured_output is True
 
@@ -45,4 +45,4 @@ def test_runtime_description_does_not_require_server_probe_or_model_download():
     provider = LlamaServerProvider(settings())
     descriptor = describe_runtime(provider)
     assert descriptor.backend == "llama-server"
-    assert descriptor.model_identity == "/models/example.gguf"
+    assert descriptor.configured_model_identity.endswith("example.gguf")
