@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from ayu.agents import AgentRunner
 from ayu.cli import main
+from ayu.execution import ExecutionPolicyError
 from ayu.store import Store
 from ayu.tools import ToolError, ToolRegistry
 
@@ -131,6 +132,35 @@ class AgentRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "exactly"):
                 runner.run("Do a bounded task")
 
+
+    def test_remote_agent_runner_requires_contract_approval(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = Store(root / "state.sqlite3")
+            with self.assertRaises(ExecutionPolicyError):
+                AgentRunner(FakeProvider([]), store, ToolRegistry(root), mode="remote")
+            approved = AgentRunner(
+                FakeProvider([]), store, ToolRegistry(root), mode="remote",
+                remote_context_approved=True,
+            )
+            self.assertIn("remote_context.send", approved.contract.capabilities)
+
+    def test_agent_run_persists_contract_and_verifiable_audit_chain(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "notes.md").write_text("evidence", encoding="utf-8")
+            store = Store(root / "state.sqlite3")
+            provider = FakeProvider([
+                json.dumps({"steps": []}),
+                "No matching evidence was requested.",
+                json.dumps({"status": "supported", "unsupported_claims": [], "reason": "No source observations were claimed."}),
+            ])
+            result = AgentRunner(provider, store, ToolRegistry(root), mode="local").run("Check evidence")
+            events = store.list_agent_events(result["run_id"])
+            initial = json.loads(events[0]["payload_json"])
+            self.assertEqual(initial["execution_contract"]["mode"], "local")
+            self.assertEqual(initial["execution_contract"]["scope_kind"], "workspace")
+            self.assertTrue(store.verify_agent_event_integrity(result["run_id"])["valid"])
 
 if __name__ == "__main__":
     unittest.main()
