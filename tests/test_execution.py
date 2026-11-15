@@ -1,5 +1,6 @@
 """Tests for immutable execution contracts and default-deny authorization."""
 import tempfile
+from dataclasses import replace
 import unittest
 from pathlib import Path
 
@@ -69,6 +70,21 @@ class ExecutionContractTests(unittest.TestCase):
         with self.assertRaises(AttributeError):
             contract.mode = "remote"
 
+
+    def test_forged_contract_cannot_add_capabilities_or_raise_budgets(self):
+        contract = ExecutionContract.for_agent(self.workspace, mode="local")
+        forged_capabilities = replace(
+            contract,
+            capabilities=contract.capabilities + ("workspace.write.task_worktree",),
+        )
+        with self.assertRaisesRegex(ExecutionPolicyError, "capabilities do not match"):
+            self.policy.authorize(forged_capabilities, ("workspace.read",))
+        forged_budget = replace(
+            contract,
+            budget=ResourceBudget(8, 4, 0, 180, 64 * 1024),
+        )
+        with self.assertRaisesRegex(ExecutionPolicyError, "resource ceilings"):
+            self.policy.authorize(forged_budget, ("workspace.read",))
 
 if __name__ == "__main__":
     unittest.main()
