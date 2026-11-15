@@ -163,6 +163,10 @@ class ExecutionPolicy:
 
     @staticmethod
     def _validate_contract(contract: ExecutionContract) -> None:
+        if not isinstance(contract.budget, ResourceBudget) or not isinstance(contract.workspace_root, str) or not contract.workspace_root:
+            raise ExecutionPolicyError("Execution contract has invalid workspace or resource-budget fields.")
+        if not isinstance(contract.capabilities, tuple) or not all(isinstance(item, str) for item in contract.capabilities):
+            raise ExecutionPolicyError("Execution contract capabilities must be an immutable string tuple.")
         capabilities = set(contract.capabilities)
         budget = contract.budget
         if contract.scope_kind == "workspace" and contract.mode == "local":
@@ -246,6 +250,9 @@ class ExecutionPolicy:
         process_invocations: int = 0,
         output_bytes: int = 0,
     ) -> None:
+        if not isinstance(contract, ExecutionContract) or contract.version != CONTRACT_VERSION:
+            raise ExecutionPolicyError("Missing or unsupported execution contract.")
+        ExecutionPolicy._validate_contract(contract)
         budget = contract.budget
         if elapsed_seconds > budget.max_wall_seconds:
             raise ExecutionPolicyError("Execution exceeded its total wall-clock budget; late results are discarded.")
