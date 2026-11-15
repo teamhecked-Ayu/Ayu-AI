@@ -22,7 +22,7 @@ The `ayu.runtime` module defines structural interfaces:
   local-only status, and optional capabilities. Describing a runtime does not
   contact a server or download a model.
 
-The existing `llama-cli` and `llama-server` adapters conform to this contract.
+The existing `llama-cli`, `llama-server`, and local-only `ollama` adapters conform to this contract.
 Their transport-specific validation, timeouts, response limits, and model checks
 remain inside their adapters. The coding workflow continues to reject adapters
 that do not implement structured output.
@@ -41,12 +41,14 @@ that do not implement structured output.
 
 ## Planned adapter sequence
 
-1. **llama.cpp CLI and llama-server** — current adapters; contract conformance
-   tests are included in this milestone.
-2. **Ollama** — local-only native API adapter, exact model-tag selection, no
-   pull/download action, bounded requests and responses.
-3. **vLLM / OpenAI-compatible local server** — local-only OpenAI-compatible
-   adapter with strict loopback endpoint validation and exact model selection.
+1. **llama.cpp CLI and llama-server** — existing adapters with contract tests.
+2. **Ollama** — implemented local-only native API adapter with numeric-loopback
+   enforcement, exact installed-model selection, bounded requests/responses,
+   timeouts, NDJSON streaming, and backend-constrained JSON Schema output. Ayu
+   never calls the model-pull API.
+3. **vLLM / OpenAI-compatible local server** — next adapter; local-only
+   OpenAI-compatible transport with strict loopback validation and exact model
+   selection.
 4. **AyuLM** — a native adapter only after the model's inference interface and
    serialization format are stable. Training/checkpoint commands are not
    interchangeable with chat inference.
@@ -71,8 +73,9 @@ that do not implement structured output.
 
 ## Current limitations
 
-This milestone does not add Ollama or vLLM adapters, model downloads, automatic
-model recommendation, or cross-platform live inference verification. The
+This milestone adds Ollama support but does not add a vLLM adapter, model
+pull/download automation, automatic model recommendation, or cross-platform
+live inference verification. The
 existing llama-server model/context checks are stronger than the llama-cli
 checks; the latter cannot prove chat-template token counts. Local inference
 binaries and model parsers run with the current user's privileges and are not
