@@ -287,6 +287,8 @@ class CodingRunner:
             raise CodeRunError(f"Local model request failed ({type(exc).__name__}); no remote fallback was attempted.") from None
         if not isinstance(result, str) or not result.strip() or len(result) > 24_000:
             raise CodeRunError("Local model returned empty or oversized coding output.")
+        if self.contract is not None:
+            self.policy.check_budget(self.contract, elapsed_seconds=elapsed_since(self.started_at), model_calls=self.calls, process_invocations=self.process_invocations)
         return result.strip()
 
     @staticmethod
