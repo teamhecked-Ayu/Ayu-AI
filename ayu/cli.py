@@ -379,7 +379,7 @@ def run_agent(store: Store, settings: Settings, args: argparse.Namespace) -> int
         if not 1 <= args.max_steps <= 4: raise ToolError("--max-steps must be between 1 and 4.")
         tools = ToolRegistry(workspace)
         provider = build_local_provider(settings) if mode == "local" else build_remote_provider(settings)
-        runner = AgentRunner(provider, store, tools, mode=mode)
+        runner = AgentRunner(provider, store, tools, mode=mode, remote_context_approved=(mode == "remote" and args.allow_remote_context))
         result = runner.run(" ".join(args.task), max_steps=args.max_steps, project_id=project_id)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
