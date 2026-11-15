@@ -48,7 +48,7 @@ class RuntimeDescriptor:
     locality: str
     supports_streaming: bool
     supports_structured_output: bool
-    model_identity: str | None = None
+    configured_model_identity: str | None = None
 
 
 def describe_runtime(runtime: ChatRuntime) -> RuntimeDescriptor:
@@ -65,5 +65,5 @@ def describe_runtime(runtime: ChatRuntime) -> RuntimeDescriptor:
         locality="local",
         supports_streaming=callable(getattr(runtime, "stream_complete", None)),
         supports_structured_output=callable(getattr(runtime, "complete_structured", None)),
-        model_identity=identity,
+        configured_model_identity=identity,
     )
