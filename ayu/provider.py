@@ -220,6 +220,8 @@ def _validate_gguf_model(model: Path | None) -> Path:
 
 class LlamaCppProvider:
     """Local inference via an already-installed llama.cpp `llama-cli` executable."""
+
+    runtime_name = "llama-cli"
     def __init__(self, settings: Settings):
         self.settings = settings
 
@@ -301,6 +303,8 @@ class LlamaCppProvider:
 
 class LlamaServerProvider:
     """Local chat via a user-started llama-server bound to a numeric loopback address."""
+
+    runtime_name = "llama-server"
 
     MAX_REQUEST_BYTES = 2 * 1024 * 1024
     MAX_RESPONSE_BYTES = 8 * 1024 * 1024
