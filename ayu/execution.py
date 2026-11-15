@@ -204,6 +204,7 @@ class ExecutionPolicy:
         model_calls: int = 0,
         tool_calls: int = 0,
         process_invocations: int = 0,
+        output_bytes: int = 0,
     ) -> None:
         budget = contract.budget
         if elapsed_seconds > budget.max_wall_seconds:
@@ -214,6 +215,8 @@ class ExecutionPolicy:
             raise ExecutionPolicyError("Execution exceeded its tool-call budget.")
         if process_invocations > budget.max_process_invocations:
             raise ExecutionPolicyError("Execution exceeded its sandbox-invocation budget.")
+        if output_bytes > budget.max_output_bytes:
+            raise ExecutionPolicyError("Execution exceeded its cumulative model-output budget.")
 
 
 def elapsed_since(started_at: float) -> float:
