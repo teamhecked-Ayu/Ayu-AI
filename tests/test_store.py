@@ -84,6 +84,17 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(OSError,"symbolic link"):
             Store(alias)
 
+    def test_audit_verification_rejects_missing_run(self):
+        result = self.store.verify_agent_event_integrity("missing-run")
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason"], "run_not_found")
+
+    def test_audit_verification_rejects_run_without_events(self):
+        self.store.create_agent_run("empty-audit-run", "empty audit", "local", 2)
+        result = self.store.verify_agent_event_integrity("empty-audit-run")
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason"], "no_events")
+
     def test_agent_event_hash_chain_verifies_and_detects_tampering(self):
         run_id = "audit-chain-test"
         self.store.create_agent_run(
