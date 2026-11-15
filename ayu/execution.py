@@ -161,6 +161,45 @@ class ExecutionContract:
 class ExecutionPolicy:
     """Deterministic default-deny authorization for built-in Ayu operations."""
 
+    @staticmethod
+    def _validate_contract(contract: ExecutionContract) -> None:
+        capabilities = set(contract.capabilities)
+        budget = contract.budget
+        if contract.scope_kind == "workspace" and contract.mode == "local":
+            expected = {"workspace.read", "model.inference.local"}
+            limits = (3, 4, 0, 180, 64 * 1024)
+            if contract.remote_context_approved or contract.sandbox_backend or contract.sandbox_policy_version:
+                raise ExecutionPolicyError("Local agent contract contains incompatible remote or sandbox settings.")
+        elif contract.scope_kind == "workspace" and contract.mode == "remote":
+            expected = {"workspace.read", "model.inference.remote", "remote_context.send"}
+            limits = (3, 4, 0, 180, 64 * 1024)
+            if contract.remote_context_approved is not True or contract.sandbox_backend or contract.sandbox_policy_version:
+                raise ExecutionPolicyError("Remote agent contract lacks explicit approval or contains sandbox settings.")
+        elif contract.scope_kind == "task_worktree" and contract.mode == "local":
+            expected = {
+                "workspace.read", "workspace.write.task_worktree",
+                "model.inference.local", "process.execute.sandbox",
+            }
+            if contract.remote_context_approved:
+                raise ExecutionPolicyError("Coding contract cannot grant remote-context transmission.")
+            if contract.sandbox_backend == "docker" and contract.sandbox_policy_version == "ayu-docker-v1":
+                limits = (5, 0, 2, 1800, 256 * 1024)
+            elif contract.sandbox_backend == "fake-test-only" and contract.sandbox_policy_version == "unit-test":
+                limits = (5, 0, 2, 1800, 256 * 1024)
+            else:
+                raise ExecutionPolicyError("Coding contract requires the supported Docker sandbox policy.")
+        else:
+            raise ExecutionPolicyError("Unsupported execution mode or scope.")
+        if capabilities != expected:
+            raise ExecutionPolicyError("Execution contract capabilities do not match its fixed profile.")
+        actual = (
+            budget.max_model_calls, budget.max_tool_calls,
+            budget.max_process_invocations, budget.max_wall_seconds,
+            budget.max_output_bytes,
+        )
+        if any(value > maximum for value, maximum in zip(actual, limits)):
+            raise ExecutionPolicyError("Execution contract exceeds the fixed resource ceilings.")
+
     def authorize(
         self,
         contract: ExecutionContract,
@@ -170,6 +209,7 @@ class ExecutionPolicy:
     ) -> None:
         if not isinstance(contract, ExecutionContract) or contract.version != CONTRACT_VERSION:
             raise ExecutionPolicyError("Missing or unsupported execution contract.")
+        ExecutionPolicy._validate_contract(contract)
         requested = tuple(required)
         if not requested or any(not isinstance(item, str) for item in requested):
             raise ExecutionPolicyError("An explicit capability set is required.")
