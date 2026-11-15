@@ -1,6 +1,6 @@
 """SQLite persistence for chat, categorized local memories, projects, and tasks."""
 from __future__ import annotations
-import json, os
+import json, os, hashlib
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -86,6 +86,13 @@ class Store:
                     event_type TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL,
                     UNIQUE(run_id,sequence));
                 CREATE INDEX IF NOT EXISTS idx_agent_events_run ON agent_events(run_id,sequence);
+                CREATE TABLE IF NOT EXISTS agent_event_integrity (
+                    run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+                    sequence INTEGER NOT NULL,
+                    previous_hash TEXT NOT NULL,
+                    event_hash TEXT NOT NULL,
+                    PRIMARY KEY(run_id,sequence),
+                    UNIQUE(run_id,event_hash));
             """)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(memories)")}
             if "category" not in columns:
@@ -96,6 +103,7 @@ class Store:
                 db.execute("ALTER TABLE memories ADD COLUMN provenance TEXT NOT NULL DEFAULT 'user'")
             db.execute("CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(category,project_id,id)")
         self._migrate_agent_run_unknown_outcome()
+        self._backfill_agent_event_integrity()
 
     def _migrate_agent_run_unknown_outcome(self) -> None:
         """Rebuild the constrained run table once, preserving rows and child events."""
@@ -128,6 +136,94 @@ class Store:
         finally:
             db.close()
             self._secure_permissions()
+
+    @staticmethod
+    def _event_digest(run_id: str, sequence: int, actor: str, event_type: str,
+                      payload_json: str, created_at: str, previous_hash: str) -> str:
+        canonical = json.dumps({
+            "run_id": run_id, "sequence": sequence, "actor": actor,
+            "event_type": event_type, "payload_json": payload_json,
+            "created_at": created_at, "previous_hash": previous_hash,
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _backfill_agent_event_integrity(self) -> None:
+        """Add a verifiable hash chain to legacy events without rewriting event content."""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT e.run_id,e.sequence,e.actor,e.event_type,e.payload_json,e.created_at "
+                "FROM agent_events e LEFT JOIN agent_event_integrity i "
+                "ON i.run_id=e.run_id AND i.sequence=e.sequence "
+                "WHERE i.run_id IS NULL ORDER BY e.run_id,e.sequence"
+            ).fetchall()
+            previous_by_run: dict[str, str] = {}
+            for row in rows:
+                run_id = row["run_id"]
+                previous = previous_by_run.get(run_id)
+                if previous is None:
+                    prior = db.execute(
+                        "SELECT event_hash FROM agent_event_integrity WHERE run_id=? AND sequence<? ORDER BY sequence DESC LIMIT 1",
+                        (run_id, row["sequence"]),
+                    ).fetchone()
+                    previous = prior["event_hash"] if prior else "0" * 64
+                digest = self._event_digest(
+                    run_id, row["sequence"], row["actor"], row["event_type"],
+                    row["payload_json"], row["created_at"], previous,
+                )
+                db.execute(
+                    "INSERT INTO agent_event_integrity(run_id,sequence,previous_hash,event_hash) VALUES(?,?,?,?)",
+                    (run_id, row["sequence"], previous, digest),
+                )
+                previous_by_run[run_id] = digest
+
+    def verify_agent_event_integrity(self, run_id: str) -> dict[str, object]:
+        """Verify event sequence and SHA-256 chain; this detects edits, not privileged deletion."""
+        with self.connect() as db:
+            events = db.execute(
+                "SELECT e.run_id,e.sequence,e.actor,e.event_type,e.payload_json,e.created_at,"
+                "i.previous_hash,i.event_hash FROM agent_events e "
+                "LEFT JOIN agent_event_integrity i ON i.run_id=e.run_id AND i.sequence=e.sequence "
+                "WHERE e.run_id=? ORDER BY e.sequence", (run_id,)
+            ).fetchall()
+        previous = "0" * 64
+        expected_sequence = 0
+        for row in events:
+            if row["sequence"] != expected_sequence:
+                return {"valid": False, "events_checked": expected_sequence, "reason": "sequence_gap"}
+            if row["event_hash"] is None:
+                return {"valid": False, "events_checked": expected_sequence, "reason": "missing_integrity_record"}
+            if row["previous_hash"] != previous:
+                return {"valid": False, "events_checked": expected_sequence, "reason": "previous_hash_mismatch"}
+            expected = self._event_digest(
+                run_id, row["sequence"], row["actor"], row["event_type"],
+                row["payload_json"], row["created_at"], previous,
+            )
+            if row["event_hash"] != expected:
+                return {"valid": False, "events_checked": expected_sequence, "reason": "event_hash_mismatch"}
+            previous = expected
+            expected_sequence += 1
+        return {"valid": True, "events_checked": expected_sequence, "head_hash": previous}
+
+    def _append_agent_event(self, db: sqlite3.Connection, run_id: str, sequence: int,
+                            actor: str, event_type: str, payload_json: str,
+                            created_at: str) -> None:
+        latest = db.execute(
+            "SELECT sequence,event_hash FROM agent_event_integrity WHERE run_id=? ORDER BY sequence DESC LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        previous = latest["event_hash"] if latest else "0" * 64
+        expected_sequence = int(latest["sequence"]) + 1 if latest else 0
+        if sequence != expected_sequence:
+            raise ValueError(f"agent event sequence must be contiguous; expected {expected_sequence}")
+        digest = self._event_digest(run_id, sequence, actor, event_type, payload_json, created_at, previous)
+        db.execute(
+            "INSERT INTO agent_events(run_id,sequence,actor,event_type,payload_json,created_at) VALUES(?,?,?,?,?,?)",
+            (run_id, sequence, actor, event_type, payload_json, created_at),
+        )
+        db.execute(
+            "INSERT INTO agent_event_integrity(run_id,sequence,previous_hash,event_hash) VALUES(?,?,?,?)",
+            (run_id, sequence, previous, digest),
+        )
 
     def add_message(self, session_id: str, role: str, content: str) -> None:
         if role not in {"user", "assistant"}:
@@ -348,8 +444,7 @@ class Store:
         with self.connect() as db:
             db.execute("INSERT INTO agent_runs(id,task,project_id,mode,status,max_steps,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (run_id,task,project_id,mode,"running",max_steps,now,now))
             if serialized_event is not None:
-                db.execute("INSERT INTO agent_events(run_id,sequence,actor,event_type,payload_json,created_at) VALUES(?,0,?,?,?,?)",
-                           (run_id, initial_event[0], initial_event[1], serialized_event, now))
+                self._append_agent_event(db, run_id, 0, initial_event[0], initial_event[1], serialized_event, now)
 
     def record_agent_event(self, run_id: str, sequence: int, actor: str, event_type: str, payload: dict) -> None:
         if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0: raise ValueError("event sequence must be a non-negative integer")
@@ -357,9 +452,10 @@ class Store:
         if not isinstance(payload,dict): raise ValueError("agent event payload must be a JSON object")
         serialized=json.dumps(payload,ensure_ascii=False,separators=(",",":"))
         if len(serialized.encode("utf-8")) > 64 * 1024: raise ValueError("agent event exceeds the 64 KiB audit limit")
+        now = utc_now()
         with self.connect() as db:
-            db.execute("INSERT INTO agent_events(run_id,sequence,actor,event_type,payload_json,created_at) VALUES(?,?,?,?,?,?)", (run_id,sequence,actor,event_type,serialized,utc_now()))
-            db.execute("UPDATE agent_runs SET updated_at=? WHERE id=? AND status='running'",(utc_now(),run_id))
+            self._append_agent_event(db, run_id, sequence, actor, event_type, serialized, now)
+            db.execute("UPDATE agent_runs SET updated_at=? WHERE id=? AND status='running'",(now,run_id))
 
     def finish_agent_run(self, run_id: str, status: str, error: str = "") -> bool:
         if status not in {"completed","failed","cancelled"}: raise ValueError("invalid terminal agent run status")
@@ -390,8 +486,7 @@ class Store:
                                   "operator_confirmed_process_stopped": True,
                                   "automatic_rerun": False, "worktree_preserved": True,
                                   "container_cleanup_attempted": False}, separators=(",", ":"))
-            db.execute("INSERT INTO agent_events(run_id,sequence,actor,event_type,payload_json,created_at) VALUES(?,?,?,?,?,?)",
-                       (run_id, sequence, "operator", "recovery_unknown_outcome", payload, now))
+            self._append_agent_event(db, run_id, sequence, "operator", "recovery_unknown_outcome", payload, now)
             changed = db.execute("UPDATE agent_runs SET status='unknown_outcome',error=?,updated_at=? WHERE id=? AND status='running'",
                                  ("Interrupted run outcome is unknown; inspect audit evidence before any manual action.", now, run_id)).rowcount
             if changed != 1:
