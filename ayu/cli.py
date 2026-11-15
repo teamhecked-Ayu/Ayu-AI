@@ -514,14 +514,14 @@ def main(argv: list[str] | None = None) -> int:
         else:
             runtime_check=("llama.cpp executable",bool(shutil.which(settings.llama_cli)) or Path(settings.llama_cli).is_file(),settings.llama_cli)
         checks = [("Python",sys.version_info >= (3,10),sys.version.split()[0]),("Database directory",parent.exists() and parent.is_dir(),str(parent)),("Local model",not settings.local_model_path or settings.local_model_path.is_file(),str(settings.local_model_path or "not configured")),runtime_check,("Remote configuration",remote_ready if remote_selected else True,"ready" if remote_ready else "incomplete/unsafe; optional unless AYU_MODE=remote")]
-        for label,ok,detail in checks: print(f"{'INFO' if label.startswith('llama-server endpoint') or label=='llama.cpp executable' else 'OK' if ok else 'NEEDS ATTENTION'}  {label}: {detail}")
+        for label,ok,detail in checks: print(f"{'INFO' if label.startswith('llama-server endpoint') or label.startswith('Ollama endpoint') or label=='llama.cpp executable' else 'OK' if ok else 'NEEDS ATTENTION'}  {label}: {detail}")
         return 0 if all(ok or label in {"llama.cpp executable","llama-server endpoint (not contacted)"} for label,ok,_ in checks) else 1
     if cmd == "status":
         messages,memories=store.counts(); print(f"Ayu AI {__version__}\nMode: {settings.mode}\nDatabase: {settings.database_path}\nPersistent memory enabled: {settings.memory_enabled}\nLocal backend: {settings.local_backend}\nLocal server URL: {settings.llama_server_url if settings.local_backend == 'llama-server' else settings.ollama_url if settings.local_backend == 'ollama' else 'not selected'}\nConfigured local model: {settings.local_model_path or 'none'}\nRemote provider: {settings.remote_provider}\nRemote model configured: {'yes' if settings.model else 'no'}\nSelected AI credential: {'present (value hidden)' if settings.api_key else 'not configured'}\nNewsAPI enabled: {settings.newsapi_enabled}\nNewsAPI credential: {'present (value hidden)' if settings.newsapi_api_key else 'not configured'}\nMessages: {messages}\nMemories: {memories}\nNo telemetry is sent."); return 0
     if cmd == "chat": return run_chat(store,settings,args)
     if cmd == "models":
         if args.models_command == "list":
-            print(f"Local GGUF: {settings.local_model_path or '(not configured)'}\nRemote provider: {settings.remote_provider}\nRemote: {'configured (opt-in only)' if settings.model and settings.api_key else '(not configured)'}")
+            print(f"Local backend: {settings.local_backend}\nConfigured local model: {settings.local_model_id or settings.local_model_path or '(not configured)'}\nRemote provider: {settings.remote_provider}\nRemote: {'configured (opt-in only)' if settings.model and settings.api_key else '(not configured)'}")
             registry=Path.home()/".ayu-ai"/"model-registry.json"
             try: entries=json.loads(registry.read_text(encoding="utf-8")) if registry.is_file() else []
             except (OSError,json.JSONDecodeError): entries=[]
