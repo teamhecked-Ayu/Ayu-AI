@@ -424,3 +424,20 @@ Not verified/blocked: real Docker filesystem/network/resource isolation, contain
 ## Upgrade and uninstall
 
 From a source checkout, update with `git pull` and `python -m pip install --upgrade -e .` in the active environment; review changes and back up the database first. `python -m pip uninstall ayu-ai` removes the package, not local user data. Remove `~/.ayu-ai/` only when you intentionally want to delete the database, registry, and any checkpoints stored there.
+
+
+## Opt-in live local runtime verification
+
+The default CI suite remains offline and uses mocked providers. To test a
+real, already-running local llama-server, Ollama, or vLLM instance, configure
+Ayu for local mode with an exact `AYU_LOCAL_MODEL_ID`, then run:
+
+```sh
+AYU_RUN_LIVE_RUNTIME_TESTS=1 python -m pytest -q -s tests/test_live_local_runtime.py
+```
+
+The opt-in test checks exact model selection, chat generation, streaming, and
+JSON-Schema-constrained output. It does not download weights, start a server,
+or contact a remote provider. Full setup instructions and PowerShell syntax
+are in [Live Local Runtime Verification](docs/LIVE_RUNTIME_VERIFICATION.md).
+A passing CI run does not imply that this live test was executed.
