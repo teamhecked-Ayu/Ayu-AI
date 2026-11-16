@@ -221,6 +221,16 @@ because current adapters do not expose comparable token-usage measurements.
 Latency is not a measure of answer quality; compare models only under the same
 hardware, server, quantization, context, and load conditions.
 
+### Local model task-quality smoke suite
+
+`ayu models evaluate` runs the versioned `ayu-local-quality-smoke-v1` suite against the explicitly selected local backend after provider preflight. It checks four deterministic tasks: exact instruction following, one arithmetic item, exact line formatting, and strict JSON shape. The JSON report includes per-case outcomes, category scores, and timing, but never includes prompts, generated responses, or exception details.
+
+This is a deliberately small smoke suite, not a general model leaderboard or a measure of broad reasoning, factuality, coding skill, multilingual performance, safety, or long-context quality. Compare results only with the same suite version and documented model/runtime/hardware conditions. A command exit status of zero means the suite ran; it does not mean the model passed every case.
+
+```sh
+ayu models evaluate
+```
+
 ## Optional OpenAI, Anthropic, and NewsAPI
 
 Choose **one** remote inference provider. The adapters use separate credential environment variables; keys are never shared between providers. Remote HTTP is rejected, error bodies are suppressed, and normal tests use mocks rather than paid/live calls.
