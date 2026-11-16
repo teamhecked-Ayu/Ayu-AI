@@ -4,7 +4,7 @@ import argparse, contextlib, json, os, re, shutil, sqlite3, sys, tempfile, uuid
 from pathlib import Path
 from . import __version__
 from .settings import Settings
-from .evaluation import benchmark_chat_runtime
+from .evaluation import benchmark_chat_runtime, evaluate_chat_runtime
 from .provider import LlamaCppProvider, LlamaServerProvider, OllamaProvider, VLLMProvider, NewsAPIClient, ProviderError, build_local_provider, build_remote_provider, remote_endpoint_error
 from .store import MEMORY_CATEGORIES, Store
 
@@ -40,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     model_benchmark = ms.add_parser("benchmark", help="Measure local model response latency with a fixed synthetic prompt")
     model_benchmark.add_argument("--runs", type=int, default=3, help="Measured completions (1..10; default 3)")
     model_benchmark.add_argument("--warmup", type=int, default=1, help="Unmeasured warm-up completions (0..2; default 1)")
+    ms.add_parser("evaluate", help="Run the fixed local model task-quality smoke suite; does not benchmark general intelligence")
     memory = sub.add_parser("memory", help="Manage private, local SQLite memories")
     mem = memory.add_subparsers(dest="memory_command", required=True)
     mem.add_parser("status", help="Show memory count and storage location")
@@ -562,6 +563,17 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             except (ProviderError,ValueError,RuntimeError) as exc:
                 print(f"Local runtime benchmark failed: {exc}",file=sys.stderr)
+                return 1
+        if args.models_command == "evaluate":
+            try:
+                provider=build_local_provider(settings)
+                provider.validate()
+                report=evaluate_chat_runtime(provider)
+                report["preflight"]="passed"
+                print(json.dumps(report,ensure_ascii=False,indent=2))
+                return 0
+            except (ProviderError,ValueError,RuntimeError) as exc:
+                print(f"Local runtime evaluation failed: {exc}",file=sys.stderr)
                 return 1
         try:
             provider=build_local_provider(settings)
