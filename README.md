@@ -441,3 +441,8 @@ JSON-Schema-constrained output. It does not download weights, start a server,
 or contact a remote provider. Full setup instructions and PowerShell syntax
 are in [Live Local Runtime Verification](docs/LIVE_RUNTIME_VERIFICATION.md).
 A passing CI run does not imply that this live test was executed.
+
+
+## Privacy-safe platform diagnostics
+
+Run `ayu doctor --json` to produce a machine-readable local capability report for desktop and Android/Termux environments. It makes no network requests, contacts no model server, and excludes credential values, model names, and absolute paths. It reports platform/runtime facts and explicitly distinguishes executable detection from live service verification. See [P5 platform diagnostics](docs/PLATFORM_DIAGNOSTICS.md) for the schema, privacy behavior, and limitations. Android/Termux remains unverified until tested on an actual device.
