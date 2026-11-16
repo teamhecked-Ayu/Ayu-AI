@@ -116,6 +116,18 @@ def test_quality_suite_contains_runtime_errors_without_leaking_exception_text():
     assert "sensitive prompt or server body" not in str(report)
 
 
+def test_quality_suite_rejects_duplicate_json_keys():
+    class DuplicateKeyRuntime(FakeRuntime):
+        def complete(self, messages):
+            self.calls += 1
+            if "valid JSON object" in messages[-1]["content"]:
+                return '{"status":"ok","count":1,"count":3}'
+            return super().complete(messages)
+    report = evaluate_chat_runtime(DuplicateKeyRuntime())
+    json_case = next(item for item in report["cases"] if item["case_id"] == "structured.json_object")
+    assert json_case["passed"] is False
+
+
 def test_cli_exposes_bounded_local_runtime_benchmark():
     args = build_parser().parse_args(["models", "benchmark", "--runs", "2", "--warmup", "0"])
     assert args.command == "models"
