@@ -1,31 +1,18 @@
-# P1 — Local Model Runtime Architecture
+# Local Model Runtime Architecture
 
 ## Objective
 
-Make the inference backend replaceable without coupling chat, agents, or coding
-workflows to one vendor/runtime. Local mode must remain local: a failed or
-misconfigured adapter must raise a visible error and must never select a remote
-provider implicitly.
+Make inference backends replaceable without coupling chat, agents, or coding
+workflows to one provider. Local mode remains local: a failed or misconfigured
+adapter raises a visible error and never selects a remote provider implicitly.
 
-## Runtime contract (implemented)
+## Runtime contract
 
-The `ayu.runtime` module defines structural interfaces:
-
-- `ChatRuntime`: the minimum `complete(messages)` contract used by chat and
-  agent orchestration.
-- `StreamingRuntime`: optional `stream_complete(messages)` capability. The
-  terminal selects streaming by capability rather than by concrete adapter
-  class.
-- `StructuredOutputRuntime`: optional JSON-Schema output capability required
-  by the coding workflow.
-- `RuntimeDescriptor`: a safe, non-secret description of backend identity,
-  local-only status, and optional capabilities. Describing a runtime does not
-  contact a server or download a model.
-
-The existing `llama-cli`, `llama-server`, local-only `ollama`, and local-only `vllm` adapters conform to this contract.
-Their transport-specific validation, timeouts, response limits, and model checks
-remain inside their adapters. The coding workflow continues to reject adapters
-that do not implement structured output.
+The `ayu.runtime` module defines structural `ChatRuntime`,
+`StreamingRuntime`, and `StructuredOutputRuntime` interfaces plus a safe
+`RuntimeDescriptor`. llama.cpp, Ollama, and vLLM adapters implement the
+relevant capabilities. Adapter transports enforce their own validation,
+timeouts, response limits, and model checks.
 
 ## Security invariants
 
@@ -33,42 +20,58 @@ that do not implement structured output.
 2. Local adapters use local transports only; no remote fallback is permitted.
 3. No adapter downloads model weights automatically.
 4. Runtime errors must not include prompts, credentials, or raw provider bodies.
-5. Each adapter must bound request/response size and enforce a timeout.
-6. Model identity must be checked where the backend exposes enough information.
-7. Optional capabilities must be detected structurally, not by checking a
-   concrete provider class.
-8. Runtime metadata must never expose API keys or arbitrary environment values. Configured model identity must not be described as verified loaded identity until the adapter performs a successful backend identity check.
+5. Each adapter bounds request/response size and enforces a timeout.
+6. Model identity is checked where the backend exposes enough information.
+7. Optional capabilities are detected structurally.
+8. Configured model identity is not described as verified loaded identity unless
+   the adapter performs a successful backend identity check.
 
-## Planned adapter sequence
+## Runtime verification and evaluation
 
-1. **llama.cpp CLI and llama-server** — existing adapters with contract tests.
-2. **Ollama** — implemented local-only native API adapter with numeric-loopback
-   enforcement, exact installed-model selection, bounded requests/responses,
-   timeouts, NDJSON streaming, and backend-constrained JSON Schema output. Ayu
-   never calls the model-pull API.
-3. **vLLM** — implemented local-only OpenAI-compatible adapter with numeric-loopback enforcement, exact served-model selection, bounded requests/responses, SSE streaming, and JSON-Schema response-format support. Structured decoding depends on the installed vLLM version and server configuration.
-4. **AyuLM** — a native adapter only after the model's inference interface and serialization format are stable. Training/checkpoint commands are not interchangeable with chat inference.
-5. **Runtime verification and evaluation** — `ayu models verify` performs backend preflight; `--infer` performs an explicit generation smoke test. `ayu models benchmark` measures bounded end-to-end latency with a fixed synthetic prompt. `ayu models evaluate` runs the versioned `ayu-local-quality-smoke-v1` deterministic suite and reports exact instruction, arithmetic, formatting, and JSON-shape outcomes. This suite is intentionally narrow and is not a general intelligence or quality leaderboard.
+- `ayu models verify` performs backend preflight.
+- `ayu models verify --infer` performs an explicit local generation smoke test.
+- `ayu models benchmark --runs 3 --warmup 1` measures end-to-end latency using
+  a fixed synthetic prompt.
+- `ayu models evaluate` runs
+  `ayu-local-quality-expanded-v2` by default.
+- `ayu models evaluate --suite ayu-local-quality-smoke-v1` retains the original
+  four-case suite for historical comparison.
 
-## Acceptance gates for each future adapter
+The original `ayu-local-quality-smoke-v1` suite remains unchanged. The
+expanded `ayu-local-quality-expanded-v2` suite adds ten deterministic checks:
+exact instruction following, two arithmetic items, exact formatting, strict
+JSON shape/types, simple classification, exact Python function text, one
+Gujarati-script response, short-context key retrieval, and a simple ordering
+constraint. The report contains suite ID, per-case outcomes, category scores,
+and latency. It excludes prompts, generated responses, and exception details.
+
+Scores are comparable only within the same suite ID and documented runtime
+conditions. The Gujarati item tests one fixed string, not broad multilingual
+competence. The code item checks exact text, not execution or security. The
+context item is short and does not measure long-context recall. Neither suite
+measures factuality, safety, broad reasoning, or general intelligence. A
+completed run means cases executed; it does not mean the model passed them.
+
+## Acceptance gates for future adapters
 
 - Unit tests for malformed messages, invalid configuration, transport failure,
   timeout, oversized responses, malformed JSON, empty output, and model mismatch.
-- Tests proving that local mode never calls a remote endpoint.
-- No credentials in child process environments unless the adapter explicitly
-  requires a dedicated local credential mechanism.
-- Structured output must be schema-constrained by the backend, not merely
-  requested in the prompt.
-- Streaming cancellation must close the transport and must not persist partial
-  assistant output as a completed answer.
+- Tests proving local mode never calls a remote endpoint.
+- No credentials in child process environments unless explicitly required.
+- Structured output is schema-constrained by the backend, not merely requested
+  in the prompt.
+- Streaming cancellation closes the transport and never persists partial
+  output as a completed answer.
 - CI on supported Python versions and operating systems.
-- Live inference smoke tests are opt-in and must report the exact backend/model;
-  mocked tests are not evidence of model quality or successful model loading.
+- Live inference tests are opt-in and report the exact backend/model; mocked
+  tests do not prove live model loading or quality.
 
 ## Current limitations
 
-This milestone adds Ollama and vLLM adapters, a bounded local latency benchmark, and a small deterministic task-quality smoke suite. It does not add model pull/download automation, automatic model recommendation, comparable token-throughput measurement, comprehensive task-quality evaluation, or cross-platform live inference verification. vLLM discovery verifies served model IDs via `/v1/models`; it does not establish weight provenance, GPU health, or model quality. The
-existing llama-server model/context checks are stronger than the llama-cli
-checks; the latter cannot prove chat-template token counts. Local inference
-binaries and model parsers run with the current user's privileges and are not
-OS sandboxes. Android/Termux remains unverified.
+The evaluation suites are smoke/evaluation sets, not comprehensive benchmarks.
+They do not measure broad coding competence, factuality, safety, long-context
+performance, or cross-platform live inference. vLLM discovery verifies served
+model IDs via `/v1/models`; it does not establish weight provenance, GPU
+health, or model quality. Local inference binaries and model parsers run with
+the current user's privileges and are not OS sandboxes. Android/Termux remains
+unverified.

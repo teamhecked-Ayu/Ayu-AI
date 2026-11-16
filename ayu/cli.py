@@ -40,7 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     model_benchmark = ms.add_parser("benchmark", help="Measure local model response latency with a fixed synthetic prompt")
     model_benchmark.add_argument("--runs", type=int, default=3, help="Measured completions (1..10; default 3)")
     model_benchmark.add_argument("--warmup", type=int, default=1, help="Unmeasured warm-up completions (0..2; default 1)")
-    ms.add_parser("evaluate", help="Run the fixed local model task-quality smoke suite; does not benchmark general intelligence")
+    model_evaluate = ms.add_parser("evaluate", help="Evaluate the explicitly selected local model against a versioned synthetic task suite")
+    model_evaluate.add_argument("--suite", choices=("ayu-local-quality-smoke-v1", "ayu-local-quality-expanded-v2"), default="ayu-local-quality-expanded-v2", help="Versioned suite ID (default: expanded v2)")
     memory = sub.add_parser("memory", help="Manage private, local SQLite memories")
     mem = memory.add_subparsers(dest="memory_command", required=True)
     mem.add_parser("status", help="Show memory count and storage location")
@@ -568,7 +569,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 provider=build_local_provider(settings)
                 provider.validate()
-                report=evaluate_chat_runtime(provider)
+                report=evaluate_chat_runtime(provider,suite_id=args.suite)
                 report["preflight"]="passed"
                 print(json.dumps(report,ensure_ascii=False,indent=2))
                 return 0

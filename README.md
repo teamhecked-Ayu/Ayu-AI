@@ -221,15 +221,30 @@ because current adapters do not expose comparable token-usage measurements.
 Latency is not a measure of answer quality; compare models only under the same
 hardware, server, quantization, context, and load conditions.
 
-### Local model task-quality smoke suite
+### Versioned local model evaluation suites
 
-`ayu models evaluate` runs the versioned `ayu-local-quality-smoke-v1` suite against the explicitly selected local backend after provider preflight. It checks four deterministic tasks: exact instruction following, one arithmetic item, exact line formatting, and strict JSON shape. The JSON report includes per-case outcomes, category scores, and timing, but never includes prompts, generated responses, or exception details.
+`ayu models evaluate` runs `ayu-local-quality-expanded-v2` by default after
+preflighting the explicitly selected local backend. The ten deterministic
+checks cover exact instruction following, two arithmetic items, exact line
+formatting, strict JSON shape/types, simple classification, exact Python
+function text, one Gujarati-script response, short-context key retrieval, and
+a simple ordering constraint.
 
-This is a deliberately small smoke suite, not a general model leaderboard or a measure of broad reasoning, factuality, coding skill, multilingual performance, safety, or long-context quality. Compare results only with the same suite version and documented model/runtime/hardware conditions. A command exit status of zero means the suite ran; it does not mean the model passed every case.
+The original four-case suite remains available for historical comparisons:
 
 ```sh
 ayu models evaluate
+ayu models evaluate --suite ayu-local-quality-smoke-v1
 ```
+
+Reports include the suite ID, per-case outcomes, category scores, and timing;
+they exclude prompts, generated responses, and exception details. Scores are
+comparable only within the same suite ID and documented runtime conditions.
+The Gujarati item is one fixed string, the code item checks exact text rather
+than execution/security, and the context item is short rather than a
+long-context benchmark. Neither suite measures broad factuality, safety,
+general reasoning, or general intelligence. A successful command means the
+cases executed, not that the model passed every case.
 
 ## Optional OpenAI, Anthropic, and NewsAPI
 

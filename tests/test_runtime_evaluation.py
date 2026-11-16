@@ -2,6 +2,8 @@ import pytest
 
 from ayu.evaluation import (
     QUALITY_SUITE_ID,
+    QUALITY_SUITE_V1_ID,
+    QUALITY_SUITE_V2_ID,
     benchmark_chat_runtime,
     evaluate_chat_runtime,
 )
@@ -29,6 +31,18 @@ class FakeRuntime:
             answer = "alpha\nbeta\ngamma"
         elif "valid JSON object" in prompt:
             answer = '{"status":"ok","count":3}'
+        elif "144 divided by 12" in prompt:
+            answer = "12"
+        elif "Classify this message" in prompt:
+            answer = "spam"
+        elif "Write exactly this Python function" in prompt:
+            answer = "def add(a, b):\n    return a + b"
+        elif "Gujarati-script greeting" in prompt:
+            answer = "નમસ્તે"
+        elif "PROJECT_KEY" in prompt:
+            answer = "AYU-7319"
+        elif "Which event happens last" in prompt:
+            answer = "C"
         else:
             answer = "unexpected"
         if self.delays:
@@ -70,17 +84,34 @@ def test_benchmark_rejects_empty_runtime_response():
         benchmark_chat_runtime(EmptyRuntime(), warmup=0)
 
 
-def test_quality_suite_reports_deterministic_case_results_without_text():
+def test_quality_v1_remains_unchanged_and_privacy_safe():
     runtime = FakeRuntime()
     report = evaluate_chat_runtime(runtime)
     assert report["status"] == "completed"
-    assert report["suite_id"] == QUALITY_SUITE_ID
+    assert report["suite_id"] == QUALITY_SUITE_V1_ID == QUALITY_SUITE_ID
     assert report["score"] == {"passed": 4, "total": 4, "percent": 100.0}
     assert {item["outcome"] for item in report["cases"]} == {"passed"}
     assert runtime.calls == 4
     assert "AYU_EVAL_EXACT_OK" not in str(report)
     assert "23 multiplied by 19" not in str(report)
     assert "status" not in report["cases"][0]
+
+
+def test_expanded_v2_covers_ten_cases_and_category_scores():
+    runtime = FakeRuntime()
+    report = evaluate_chat_runtime(runtime, suite_id=QUALITY_SUITE_V2_ID)
+    assert report["suite_id"] == "ayu-local-quality-expanded-v2"
+    assert report["score"] == {"passed": 10, "total": 10, "percent": 100.0}
+    assert runtime.calls == 10
+    assert "multilingual" in report["category_scores"]
+    assert "context_retrieval" in report["category_scores"]
+    assert "AYU-7319" not in str(report)
+    assert "PROJECT_KEY" not in str(report)
+
+
+def test_quality_suite_rejects_unknown_version():
+    with pytest.raises(ValueError, match="Unknown quality suite"):
+        evaluate_chat_runtime(FakeRuntime(), suite_id="ayu-local-quality-v99")
 
 
 def test_quality_suite_scores_wrong_answer_without_failing_execution():
@@ -136,7 +167,9 @@ def test_cli_exposes_bounded_local_runtime_benchmark():
     assert args.warmup == 0
 
 
-def test_cli_exposes_local_model_quality_evaluation():
+def test_cli_defaults_to_expanded_evaluation_and_allows_v1():
     args = build_parser().parse_args(["models", "evaluate"])
-    assert args.command == "models"
     assert args.models_command == "evaluate"
+    assert args.suite == QUALITY_SUITE_V2_ID
+    old = build_parser().parse_args(["models", "evaluate", "--suite", QUALITY_SUITE_V1_ID])
+    assert old.suite == QUALITY_SUITE_V1_ID
