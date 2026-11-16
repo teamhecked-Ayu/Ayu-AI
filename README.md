@@ -184,6 +184,43 @@ ayu chat --mode local --once "Explain what a context window is in one sentence."
 
 PowerShell can set the same variables with `$env:AYU_MODE = "local"`, `$env:AYU_LOCAL_BACKEND = "llama-server"`, `$env:AYU_LOCAL_MODEL = "C:\models\model.gguf"`, and `$env:AYU_LLAMA_SERVER_URL = "http://127.0.0.1:9931"`. For a standalone `llama-cli` workflow, set `AYU_LOCAL_BACKEND=llama-cli` and `AYU_LLAMA_CLI` to the installed executable; the stronger context-aware chat check is specific to `llama-server`.
 
+## Local vLLM inference
+
+Ayu can connect to an already-running local vLLM OpenAI-compatible server. Start
+vLLM separately using its official installation and model-serving instructions,
+bind the API to loopback, and configure the exact model ID reported by
+`/v1/models`:
+
+```sh
+export AYU_MODE=local
+export AYU_LOCAL_BACKEND=vllm
+export AYU_VLLM_URL=http://127.0.0.1:8000
+export AYU_LOCAL_MODEL_ID='Qwen/Qwen2.5-7B-Instruct'
+ayu config validate
+ayu models verify
+ayu models verify --infer
+ayu models benchmark --runs 3 --warmup 1
+```
+
+The adapter requires a numeric loopback URL, verifies an exact served model ID,
+bounds request/response sizes, applies the configured timeout, and supports
+SSE streaming plus JSON-Schema response-format requests. Structured decoding
+depends on the installed vLLM version and server configuration. Ayu does not
+download model weights, expose remote fallback, or sandbox the vLLM process.
+The `verify` command checks availability and model identity; `--infer` tests
+generation.
+
+### Local runtime latency benchmark
+
+`ayu models benchmark` runs a fixed synthetic prompt against the selected local
+backend, performs one warm-up by default, and reports per-request plus
+minimum/median/maximum end-to-end latency as JSON. Use `--runs 1..10` and
+`--warmup 0..2` to control the small bounded workload. The report does not
+include prompts or generated text. It deliberately does not claim tokens/second
+because current adapters do not expose comparable token-usage measurements.
+Latency is not a measure of answer quality; compare models only under the same
+hardware, server, quantization, context, and load conditions.
+
 ## Optional OpenAI, Anthropic, and NewsAPI
 
 Choose **one** remote inference provider. The adapters use separate credential environment variables; keys are never shared between providers. Remote HTTP is rejected, error bodies are suppressed, and normal tests use mocks rather than paid/live calls.
