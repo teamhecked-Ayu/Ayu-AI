@@ -4,6 +4,7 @@ import argparse, contextlib, json, os, re, shutil, sqlite3, sys, tempfile, uuid
 from pathlib import Path
 from . import __version__
 from .settings import Settings
+from .evaluation import benchmark_chat_runtime
 from .provider import LlamaCppProvider, LlamaServerProvider, OllamaProvider, VLLMProvider, NewsAPIClient, ProviderError, build_local_provider, build_remote_provider, remote_endpoint_error
 from .store import MEMORY_CATEGORIES, Store
 
@@ -36,6 +37,9 @@ def build_parser() -> argparse.ArgumentParser:
     ms.add_parser("info", help="Show model configuration without secrets")
     model_verify = ms.add_parser("verify", help="Preflight the configured local model/runtime; use --infer to test actual generation")
     model_verify.add_argument("--infer", action="store_true", help="Load/use the selected local model and require a non-empty generated response")
+    model_benchmark = ms.add_parser("benchmark", help="Measure local model response latency with a fixed synthetic prompt")
+    model_benchmark.add_argument("--runs", type=int, default=3, help="Measured completions (1..10; default 3)")
+    model_benchmark.add_argument("--warmup", type=int, default=1, help="Unmeasured warm-up completions (0..2; default 1)")
     memory = sub.add_parser("memory", help="Manage private, local SQLite memories")
     mem = memory.add_subparsers(dest="memory_command", required=True)
     mem.add_parser("status", help="Show memory count and storage location")
@@ -548,6 +552,17 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 runtime=f"llama.cpp CLI: {settings.llama_cli}"
             print(f"Local backend: {settings.local_backend}\nRuntime: {runtime}\nLocal model: {p or 'not configured'}\nModel file present: {bool(p and p.is_file())}\nRemote provider: {settings.remote_provider}\nRemote mode configured: {bool(settings.api_key and settings.model)}\nRemote calls are never used in local mode."); return 0
+        if args.models_command == "benchmark":
+            try:
+                provider=build_local_provider(settings)
+                provider.validate()
+                report=benchmark_chat_runtime(provider,runs=args.runs,warmup=args.warmup)
+                report["preflight"]="passed"
+                print(json.dumps(report,ensure_ascii=False,indent=2))
+                return 0
+            except (ProviderError,ValueError,RuntimeError) as exc:
+                print(f"Local runtime benchmark failed: {exc}",file=sys.stderr)
+                return 1
         try:
             provider=build_local_provider(settings)
             if isinstance(provider,LlamaServerProvider):
