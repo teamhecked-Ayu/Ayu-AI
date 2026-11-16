@@ -70,3 +70,21 @@ jobs:
         run: docker pull "$AYU_TEST_SANDBOX_IMAGE"
       - name: Run real Docker boundary and cleanup tests
         run: python -m pytest -q tests/test_sandbox_integration.py
+
+  termux-compatibility-contract:
+    name: Termux compatibility contract (Linux simulation)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install basic package
+        run: python -m pip install .
+      - name: Exercise Termux detection and offline baseline
+        env:
+          ANDROID_ROOT: /system
+          PREFIX: /data/data/com.termux/files/usr
+          TERMUX_VERSION: ci-simulation
+        run: bash scripts/termux-smoke.sh

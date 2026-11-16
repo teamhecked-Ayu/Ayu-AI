@@ -446,3 +446,14 @@ A passing CI run does not imply that this live test was executed.
 ## Privacy-safe platform diagnostics
 
 Run `ayu doctor --json` to produce a machine-readable local capability report for desktop and Android/Termux environments. It makes no network requests, contacts no model server, and excludes credential values, model names, and absolute paths. It reports platform/runtime facts and explicitly distinguishes executable detection from live service verification. See [P5 platform diagnostics](docs/PLATFORM_DIAGNOSTICS.md) for the schema, privacy behavior, and limitations. Android/Termux remains unverified until tested on an actual device.
+
+
+## Android / Termux baseline verification
+
+The basic CLI now has a repeatable offline smoke test: run `bash scripts/termux-smoke.sh`
+inside an activated environment after installation. The Linux CI job simulates
+Termux environment markers to test the contract; it is **not** an Android
+emulator or proof of device compatibility. Follow
+[the real-device verification procedure](docs/TERMUX_DEVICE_VERIFICATION.md)
+and report actual Android results separately. Local model inference and GPU
+acceleration are not covered by this baseline.
