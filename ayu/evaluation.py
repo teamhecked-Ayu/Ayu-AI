@@ -1,8 +1,4 @@
-"""Privacy-safe local runtime latency and task-quality evaluations.
-
-The quality suite is a small deterministic smoke suite, not a broad measure of
-reasoning, factuality, coding ability, or general intelligence.
-"""
+"""Privacy-safe local runtime latency and task-quality evaluations."""
 from __future__ import annotations
 
 import json
@@ -91,37 +87,81 @@ def _exact_json(expected: dict[str, Any]) -> Callable[[str], bool]:
     return validate
 
 
-QUALITY_SUITE_ID = "ayu-local-quality-smoke-v1"
-_QUALITY_CASES: tuple[tuple[str, str, str, Callable[[str], bool]], ...] = (
+QUALITY_SUITE_V1_ID = "ayu-local-quality-smoke-v1"
+QUALITY_SUITE_V2_ID = "ayu-local-quality-expanded-v2"
+QUALITY_SUITE_ID = QUALITY_SUITE_V1_ID
+
+_QUALITY_CASES_V1: tuple[tuple[str, str, str, Callable[[str], bool]], ...] = (
     (
-        "instruction.exact_token",
-        "instruction_following",
+        "instruction.exact_token", "instruction_following",
         "Reply with exactly this token and nothing else: AYU_EVAL_EXACT_OK",
         _exact_text("AYU_EVAL_EXACT_OK"),
     ),
     (
-        "reasoning.integer_arithmetic",
-        "basic_arithmetic",
+        "reasoning.integer_arithmetic", "basic_arithmetic",
         "Calculate 23 multiplied by 19. Reply with only the integer.",
         _exact_text("437"),
     ),
     (
-        "format.exact_lines",
-        "format_adherence",
+        "format.exact_lines", "format_adherence",
         "Return exactly three lines, with no bullets or extra text:\nalpha\nbeta\ngamma",
         _exact_text("alpha\nbeta\ngamma"),
     ),
     (
-        "structured.json_object",
-        "structured_output",
+        "structured.json_object", "structured_output",
         'Return only a valid JSON object with exactly two keys: "status" set to the string "ok", and "count" set to the integer 3.',
         _exact_json({"status": "ok", "count": 3}),
     ),
 )
 
+# v2 is a separate, immutable suite ID. Keep v1 available so historical scores
+# remain comparable; never silently change the cases behind an existing ID.
+_QUALITY_CASES_V2: tuple[tuple[str, str, str, Callable[[str], bool]], ...] = (
+    *_QUALITY_CASES_V1,
+    (
+        "reasoning.integer_division", "basic_arithmetic",
+        "Calculate 144 divided by 12. Reply with only the integer.",
+        _exact_text("12"),
+    ),
+    (
+        "classification.simple_label", "classification",
+        "Classify this message as exactly one label: spam or not_spam. Message: 'You won a prize; claim it now by clicking this link.' Reply with only the label.",
+        _exact_text("spam"),
+    ),
+    (
+        "coding.exact_function", "code_generation",
+        "Write exactly this Python function and nothing else: a function named add that accepts a and b and returns their sum. Use this exact formatting:\ndef add(a, b):\n    return a + b",
+        _exact_text("def add(a, b):\n    return a + b"),
+    ),
+    (
+        "multilingual.gujarati_greeting", "multilingual",
+        "Write the Gujarati-script greeting for 'hello' only. Do not use Latin letters.",
+        _exact_text("નમસ્તે"),
+    ),
+    (
+        "context.key_retrieval", "context_retrieval",
+        "Read this note and return only the value of PROJECT_KEY.\nOWNER=AYU\nREGION=WEST\nPROJECT_KEY=AYU-7319\nSTATUS=ACTIVE\nARCHIVE_KEY=OLD-2041",
+        _exact_text("AYU-7319"),
+    ),
+    (
+        "reasoning.order_constraint", "basic_reasoning",
+        "A must happen before B. B must happen before C. Which event happens last? Reply with only A, B, or C.",
+        _exact_text("C"),
+    ),
+)
 
-def evaluate_chat_runtime(runtime: ChatRuntime) -> dict[str, Any]:
-    """Run a fixed synthetic suite; omit prompts, responses, and exception details."""
+
+def evaluate_chat_runtime(
+    runtime: ChatRuntime, *, suite_id: str = QUALITY_SUITE_V1_ID
+) -> dict[str, Any]:
+    """Run a versioned synthetic suite; omit prompts, responses, and exception details."""
+    suites = {
+        QUALITY_SUITE_V1_ID: _QUALITY_CASES_V1,
+        QUALITY_SUITE_V2_ID: _QUALITY_CASES_V2,
+    }
+    if suite_id not in suites:
+        raise ValueError("Unknown quality suite ID.")
+    cases = suites[suite_id]
     results: list[dict[str, Any]] = []
     category_totals: dict[str, list[int]] = {}
     elapsed: list[float] = []
@@ -130,7 +170,7 @@ def evaluate_chat_runtime(runtime: ChatRuntime) -> dict[str, Any]:
         "Follow the user's output constraints exactly. Do not add explanations unless requested."
     )
 
-    for case_id, category, prompt, validator in _QUALITY_CASES:
+    for case_id, category, prompt, validator in cases:
         started = time.perf_counter()
         try:
             answer = runtime.complete([
@@ -139,18 +179,15 @@ def evaluate_chat_runtime(runtime: ChatRuntime) -> dict[str, Any]:
             ])
             duration_ms = round((time.perf_counter() - started) * 1000, 3)
             if not isinstance(answer, str):
-                passed = False
-                outcome = "invalid_response_type"
+                passed, outcome = False, "invalid_response_type"
             elif not answer.strip():
-                passed = False
-                outcome = "empty_response"
+                passed, outcome = False, "empty_response"
             else:
                 passed = bool(validator(answer))
                 outcome = "passed" if passed else "incorrect"
         except Exception:
             duration_ms = round((time.perf_counter() - started) * 1000, 3)
-            passed = False
-            outcome = "runtime_error"
+            passed, outcome = False, "runtime_error"
 
         elapsed.append(duration_ms)
         category_totals.setdefault(category, []).append(1 if passed else 0)
@@ -167,7 +204,7 @@ def evaluate_chat_runtime(runtime: ChatRuntime) -> dict[str, Any]:
     descriptor = describe_runtime(runtime)
     return {
         "status": "completed",
-        "suite_id": QUALITY_SUITE_ID,
+        "suite_id": suite_id,
         "backend": descriptor.backend,
         "locality": descriptor.locality,
         "configured_model_identity": descriptor.configured_model_identity,
@@ -192,10 +229,13 @@ def evaluate_chat_runtime(runtime: ChatRuntime) -> dict[str, Any]:
         },
         "privacy": "synthetic prompts only; prompts, generated responses, and exception details are not included",
         "limitations": [
-            "This four-case smoke suite is not a comprehensive model-quality benchmark.",
-            "It tests exact instruction following, one arithmetic item, exact formatting, and strict JSON shape only.",
-            "It does not measure factuality, broad reasoning, coding competence, multilingual quality, safety, or long-context performance.",
-            "Scores are meaningful only when comparing the same suite version under documented conditions.",
-            "A completed evaluation may have a low score; completion means the cases ran, not that the model passed them.",
+            "The selected suite is a deterministic smoke/evaluation set, not a comprehensive model-quality benchmark.",
+            "v1 contains four cases; v2 contains ten cases covering instruction following, arithmetic, formatting, JSON shape/types, classification, exact code formatting, one Gujarati response, short-context retrieval, and ordering.",
+            "The Gujarati item tests one fixed string only; it does not measure broad multilingual competence.",
+            "The code item checks exact text, not whether code executes or is secure.",
+            "The context item is short and does not measure long-context recall.",
+            "Neither suite measures factuality, broad reasoning, safety, or general intelligence.",
+            "Compare scores only within the same suite ID and documented runtime conditions.",
+            "A completed evaluation may have a low score; completion means cases ran, not that the model passed them.",
         ],
     }
