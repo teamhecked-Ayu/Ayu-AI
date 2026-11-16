@@ -48,7 +48,7 @@ that do not implement structured output.
    never calls the model-pull API.
 3. **vLLM** — implemented local-only OpenAI-compatible adapter with numeric-loopback enforcement, exact served-model selection, bounded requests/responses, SSE streaming, and JSON-Schema response-format support. Structured decoding depends on the installed vLLM version and server configuration.
 4. **AyuLM** — a native adapter only after the model's inference interface and serialization format are stable. Training/checkpoint commands are not interchangeable with chat inference.
-5. **Runtime verification and evaluation** — next: explicit health checks, model identity, context limits where verifiable, throughput and task-quality benchmarks. Reports must distinguish measured facts from backend claims.
+5. **Runtime verification and evaluation** — `ayu models verify` performs backend preflight; `--infer` performs an explicit generation smoke test. `ayu models benchmark` now measures bounded end-to-end latency with a fixed synthetic prompt and reports min/median/max. Comparable token throughput and task-quality evaluation remain pending until adapters expose reliable usage metadata and a versioned evaluation set exists.
 
 ## Acceptance gates for each future adapter
 
@@ -67,7 +67,7 @@ that do not implement structured output.
 
 ## Current limitations
 
-This milestone adds Ollama and vLLM adapters but does not add model pull/download automation, automatic model recommendation, or cross-platform live inference verification. vLLM discovery verifies served model IDs via `/v1/models`; it does not establish weight provenance, GPU health, or model quality. The
+This milestone adds Ollama and vLLM adapters plus a bounded local latency benchmark, but does not add model pull/download automation, automatic model recommendation, comparable token-throughput measurement, task-quality evaluation, or cross-platform live inference verification. vLLM discovery verifies served model IDs via `/v1/models`; it does not establish weight provenance, GPU health, or model quality. The
 existing llama-server model/context checks are stronger than the llama-cli
 checks; the latter cannot prove chat-template token counts. Local inference
 binaries and model parsers run with the current user's privileges and are not
