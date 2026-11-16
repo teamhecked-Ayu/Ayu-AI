@@ -1,8 +1,7 @@
-from pathlib import Path
-
 import pytest
 
 from ayu.evaluation import benchmark_chat_runtime
+from ayu.cli import build_parser
 
 
 class FakeRuntime:
@@ -53,3 +52,10 @@ def test_benchmark_rejects_empty_runtime_response():
             return " "
     with pytest.raises(RuntimeError, match="empty"):
         benchmark_chat_runtime(EmptyRuntime(), warmup=0)
+
+def test_cli_exposes_bounded_local_runtime_benchmark():
+    args = build_parser().parse_args(["models", "benchmark", "--runs", "2", "--warmup", "0"])
+    assert args.command == "models"
+    assert args.models_command == "benchmark"
+    assert args.runs == 2
+    assert args.warmup == 0
