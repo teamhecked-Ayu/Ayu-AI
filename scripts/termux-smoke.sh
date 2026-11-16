@@ -29,6 +29,7 @@ import os
 
 report = json.loads(os.environ["AYU_DOCTOR_JSON"])
 assert report.get("schema_version") == "ayu-platform-diagnostics-v1"
+assert report.get("platform", {}).get("profile") == "android-termux", report.get("platform", {}).get("profile")
 assert report.get("privacy", {}).get("network_requests") == 0
 assert report.get("runtime", {}).get("server_contacted") is False
 assert report.get("status") in {"ready", "warning"}, report.get("status")
