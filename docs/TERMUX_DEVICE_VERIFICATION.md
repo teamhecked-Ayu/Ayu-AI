@@ -6,18 +6,22 @@ acceleration, Docker sandboxing, background execution, or all Android versions.
 
 ## Install the baseline
 
-Use the official Termux distribution and its package manager. In Termux:
+Use the official Termux distribution. Install prerequisites with Termux's
+package manager, then clone the repository:
 
 ```sh
 pkg update
 pkg install python git
 git clone https://github.com/teamhecked-Ayu/Ayu-AI.git
 cd Ayu-AI
-python -m venv .venv
-. .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install .
+bash scripts/termux-install.sh
 ```
+
+The installer checks Python 3.10+, creates or reuses a project-local `.venv`,
+installs Ayu inside that environment, and runs the offline smoke test. It does
+not install packages into Termux's managed Python, upgrade pip, download model
+weights, or configure an inference server. If an existing `.venv` is malformed,
+it stops rather than deleting or replacing it.
 
 If pip reports a build/backend incompatibility, record the exact Python, pip,
 setuptools and wheel versions. Do not disable package isolation or bypass
@@ -25,9 +29,10 @@ Termux package safeguards as a blind workaround.
 
 ## Run the on-device smoke test
 
-From the repository root, with the virtual environment active:
+The installer already runs the smoke test. To repeat it later:
 
 ```sh
+. .venv/bin/activate
 bash scripts/termux-smoke.sh
 ayu doctor --json
 ```

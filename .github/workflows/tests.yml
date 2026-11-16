@@ -80,11 +80,9 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install basic package
-        run: python -m pip install .
-      - name: Exercise Termux detection and offline baseline
+      - name: Exercise isolated Termux installer and offline baseline
         env:
           ANDROID_ROOT: /system
           PREFIX: /data/data/com.termux/files/usr
           TERMUX_VERSION: ci-simulation
-        run: bash scripts/termux-smoke.sh
+        run: bash scripts/termux-install.sh

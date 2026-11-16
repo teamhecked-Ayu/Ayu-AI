@@ -47,13 +47,15 @@ pkg update
 pkg install python git
 git clone https://github.com/teamhecked-Ayu/Ayu-AI.git
 cd Ayu-AI
-python -m venv .venv
+bash scripts/termux-install.sh
 . .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
 ayu doctor
 ayu test
 ```
+
+The bootstrap creates a project-local virtual environment, installs Ayu there,
+and runs the offline Termux baseline smoke test. It does not alter Termux's
+managed Python or install an LLM runtime.
 
 If Termux's Python packaging policy or a wheel/native dependency prevents installation, do not bypass that policy blindly; retain the basic CLI profile or use the appropriate Termux package. GGUF files can be large; check available storage/RAM and the model license first. No Docker, GPU, or model download is required for basic commands.
 
