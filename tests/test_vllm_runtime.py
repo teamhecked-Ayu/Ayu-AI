@@ -95,9 +95,9 @@ def test_vllm_structured_output_uses_json_schema_response_format():
 def test_vllm_streaming_parses_sse_and_conforms_to_runtime_protocols():
     listing = {"data": [{"id": "Qwen/Qwen2.5-7B-Instruct"}]}
     stream = FakeResponse(lines=[
-        b'data: {"choices":[{"delta":{"content":"hello"}}]}\\n',
-        b'data: {"choices":[{"delta":{"content":" world"}}]}\\n',
-        b'data: [DONE]\\n',
+        b'data: {"choices":[{"delta":{"content":"hello"}}]}\n',
+        b'data: {"choices":[{"delta":{"content":" world"}}]}\n',
+        b'data: [DONE]\n',
     ], content_type="text/event-stream")
     connections = [FakeConnection(FakeResponse(listing)), FakeConnection(stream)]
     with patch("ayu.provider.http.client.HTTPConnection", side_effect=connections):
