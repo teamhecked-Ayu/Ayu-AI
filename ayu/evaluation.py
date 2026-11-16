@@ -71,10 +71,18 @@ def _exact_text(expected: str) -> Callable[[str], bool]:
 
 
 def _exact_json(expected: dict[str, Any]) -> Callable[[str], bool]:
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON object key")
+            result[key] = value
+        return result
+
     def validate(answer: str) -> bool:
         try:
-            parsed = json.loads(answer)
-        except (TypeError, json.JSONDecodeError):
+            parsed = json.loads(answer, object_pairs_hook=reject_duplicate_keys)
+        except (TypeError, ValueError, json.JSONDecodeError):
             return False
         if not isinstance(parsed, dict) or parsed.keys() != expected.keys():
             return False
