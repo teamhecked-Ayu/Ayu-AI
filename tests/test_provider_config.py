@@ -39,6 +39,18 @@ class ConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "AYU_LOCAL_MAX_INPUT_CHARS"):
                     Settings.load(Path("/nonexistent/.env"))
 
+    def test_ollama_backend_settings_are_explicit_and_loopback_defaulted(self):
+        with patch.dict(os.environ, {
+            "AYU_LOCAL_BACKEND": "ollama",
+            "AYU_LOCAL_MODEL_ID": "qwen2.5:7b",
+            "AYU_OLLAMA_URL": "http://127.0.0.1:11434",
+            "AYU_DATABASE": "/tmp/ayu-test.sqlite",
+        }, clear=True):
+            settings = Settings.load(Path("/nonexistent/.env"))
+        self.assertEqual(settings.local_backend, "ollama")
+        self.assertEqual(settings.local_model_id, "qwen2.5:7b")
+        self.assertEqual(settings.ollama_url, "http://127.0.0.1:11434")
+
     def test_invalid_remote_url_is_deferred_until_remote_use(self):
         with patch.dict(os.environ, {"AYU_BASE_URL": "file:///tmp", "AYU_DATABASE": "/tmp/ayu-test.sqlite"}, clear=True):
             settings = Settings.load(Path("/nonexistent/.env"))
@@ -46,6 +58,18 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderError, "AYU_BASE_URL"):
             ChatProvider(settings.__class__(api_key="test",base_url=settings.base_url,model="m",database_path=settings.database_path)).complete([])
 
+
+    def test_vllm_backend_settings_are_explicit_and_loopback_defaulted(self):
+        with patch.dict(os.environ, {
+            "AYU_LOCAL_BACKEND": "vllm",
+            "AYU_LOCAL_MODEL_ID": "Qwen/Qwen2.5-7B-Instruct",
+            "AYU_VLLM_URL": "http://127.0.0.1:8000",
+            "AYU_DATABASE": "/tmp/ayu-test.sqlite",
+        }, clear=True):
+            settings = Settings.load(Path("/nonexistent/.env"))
+        self.assertEqual(settings.local_backend, "vllm")
+        self.assertEqual(settings.local_model_id, "Qwen/Qwen2.5-7B-Instruct")
+        self.assertEqual(settings.vllm_url, "http://127.0.0.1:8000")
 
 class ProviderTests(unittest.TestCase):
     def settings(self, **overrides):

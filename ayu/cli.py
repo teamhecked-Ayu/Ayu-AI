@@ -4,7 +4,8 @@ import argparse, contextlib, json, os, re, shutil, sqlite3, sys, tempfile, uuid
 from pathlib import Path
 from . import __version__
 from .settings import Settings
-from .provider import LlamaCppProvider, LlamaServerProvider, NewsAPIClient, ProviderError, build_local_provider, build_remote_provider, remote_endpoint_error
+from .evaluation import benchmark_chat_runtime
+from .provider import LlamaCppProvider, LlamaServerProvider, OllamaProvider, VLLMProvider, NewsAPIClient, ProviderError, build_local_provider, build_remote_provider, remote_endpoint_error
 from .store import MEMORY_CATEGORIES, Store
 
 SYSTEM = ("You are Ayu AI, a careful assistant. Be candid about uncertainty. Do not claim to have executed code, "
@@ -36,6 +37,9 @@ def build_parser() -> argparse.ArgumentParser:
     ms.add_parser("info", help="Show model configuration without secrets")
     model_verify = ms.add_parser("verify", help="Preflight the configured local model/runtime; use --infer to test actual generation")
     model_verify.add_argument("--infer", action="store_true", help="Load/use the selected local model and require a non-empty generated response")
+    model_benchmark = ms.add_parser("benchmark", help="Measure local model response latency with a fixed synthetic prompt")
+    model_benchmark.add_argument("--runs", type=int, default=3, help="Measured completions (1..10; default 3)")
+    model_benchmark.add_argument("--warmup", type=int, default=1, help="Unmeasured warm-up completions (0..2; default 1)")
     memory = sub.add_parser("memory", help="Manage private, local SQLite memories")
     mem = memory.add_subparsers(dest="memory_command", required=True)
     mem.add_parser("status", help="Show memory count and storage location")
@@ -191,7 +195,7 @@ def run_chat(store: Store, settings: Settings, args: argparse.Namespace) -> int:
         context = lexical_context(store, text) if settings.memory_enabled else ""
         if context: msgs.append({"role":"system","content":context})
         msgs.extend(store.history(session_id))
-        if isinstance(provider,LlamaServerProvider):
+        if callable(getattr(provider, "stream_complete", None)):
             pieces=[]
             print("Ayu: ",end="",flush=True)
             stream=provider.stream_complete(msgs)
@@ -421,8 +425,8 @@ def run_coding(store: Store, settings: Settings, args: argparse.Namespace) -> in
     if settings.mode != "local":
         print("Coding runs require AYU_MODE=local; remote coding-context transfer is not enabled in this initial implementation.", file=sys.stderr)
         return 2
-    if settings.local_backend != "llama-server":
-        print("Coding runs require AYU_LOCAL_BACKEND=llama-server for strict local JSON Schema output; llama-cli remains available for ordinary local chat.", file=sys.stderr)
+    if settings.local_backend not in {"llama-server", "ollama", "vllm"}:
+        print("Coding runs require a local backend with JSON-Schema-constrained output (llama-server, ollama, or vllm); llama-cli remains available for ordinary local chat.", file=sys.stderr)
         return 2
     sandbox = DockerSandboxRunner.from_environment()
     try:
@@ -509,17 +513,21 @@ def main(argv: list[str] | None = None) -> int:
         remote_ready=bool(settings.api_key and settings.model) and endpoint_ok
         if settings.local_backend == "llama-server":
             runtime_check=("llama-server endpoint (not contacted)",True,settings.llama_server_url)
+        elif settings.local_backend == "ollama":
+            runtime_check=("Ollama endpoint (not contacted)",True,settings.ollama_url)
+        elif settings.local_backend == "vllm":
+            runtime_check=("vLLM endpoint (not contacted)",True,settings.vllm_url)
         else:
             runtime_check=("llama.cpp executable",bool(shutil.which(settings.llama_cli)) or Path(settings.llama_cli).is_file(),settings.llama_cli)
         checks = [("Python",sys.version_info >= (3,10),sys.version.split()[0]),("Database directory",parent.exists() and parent.is_dir(),str(parent)),("Local model",not settings.local_model_path or settings.local_model_path.is_file(),str(settings.local_model_path or "not configured")),runtime_check,("Remote configuration",remote_ready if remote_selected else True,"ready" if remote_ready else "incomplete/unsafe; optional unless AYU_MODE=remote")]
-        for label,ok,detail in checks: print(f"{'INFO' if label.startswith('llama-server endpoint') or label=='llama.cpp executable' else 'OK' if ok else 'NEEDS ATTENTION'}  {label}: {detail}")
+        for label,ok,detail in checks: print(f"{'INFO' if label.startswith('llama-server endpoint') or label.startswith('Ollama endpoint') or label.startswith('vLLM endpoint') or label=='llama.cpp executable' else 'OK' if ok else 'NEEDS ATTENTION'}  {label}: {detail}")
         return 0 if all(ok or label in {"llama.cpp executable","llama-server endpoint (not contacted)"} for label,ok,_ in checks) else 1
     if cmd == "status":
-        messages,memories=store.counts(); print(f"Ayu AI {__version__}\nMode: {settings.mode}\nDatabase: {settings.database_path}\nPersistent memory enabled: {settings.memory_enabled}\nLocal backend: {settings.local_backend}\nLocal server URL: {settings.llama_server_url if settings.local_backend == 'llama-server' else 'not selected'}\nConfigured local model: {settings.local_model_path or 'none'}\nRemote provider: {settings.remote_provider}\nRemote model configured: {'yes' if settings.model else 'no'}\nSelected AI credential: {'present (value hidden)' if settings.api_key else 'not configured'}\nNewsAPI enabled: {settings.newsapi_enabled}\nNewsAPI credential: {'present (value hidden)' if settings.newsapi_api_key else 'not configured'}\nMessages: {messages}\nMemories: {memories}\nNo telemetry is sent."); return 0
+        messages,memories=store.counts(); print(f"Ayu AI {__version__}\nMode: {settings.mode}\nDatabase: {settings.database_path}\nPersistent memory enabled: {settings.memory_enabled}\nLocal backend: {settings.local_backend}\nLocal server URL: {settings.llama_server_url if settings.local_backend == 'llama-server' else settings.ollama_url if settings.local_backend == 'ollama' else settings.vllm_url if settings.local_backend == 'vllm' else 'not selected'}\nConfigured local model: {settings.local_model_path or 'none'}\nRemote provider: {settings.remote_provider}\nRemote model configured: {'yes' if settings.model else 'no'}\nSelected AI credential: {'present (value hidden)' if settings.api_key else 'not configured'}\nNewsAPI enabled: {settings.newsapi_enabled}\nNewsAPI credential: {'present (value hidden)' if settings.newsapi_api_key else 'not configured'}\nMessages: {messages}\nMemories: {memories}\nNo telemetry is sent."); return 0
     if cmd == "chat": return run_chat(store,settings,args)
     if cmd == "models":
         if args.models_command == "list":
-            print(f"Local GGUF: {settings.local_model_path or '(not configured)'}\nRemote provider: {settings.remote_provider}\nRemote: {'configured (opt-in only)' if settings.model and settings.api_key else '(not configured)'}")
+            print(f"Local backend: {settings.local_backend}\nConfigured local model: {settings.local_model_id or settings.local_model_path or '(not configured)'}\nRemote provider: {settings.remote_provider}\nRemote: {'configured (opt-in only)' if settings.model and settings.api_key else '(not configured)'}")
             registry=Path.home()/".ayu-ai"/"model-registry.json"
             try: entries=json.loads(registry.read_text(encoding="utf-8")) if registry.is_file() else []
             except (OSError,json.JSONDecodeError): entries=[]
@@ -537,21 +545,43 @@ def main(argv: list[str] | None = None) -> int:
             p=settings.local_model_path
             if settings.local_backend == "llama-server":
                 runtime=f"llama-server at {settings.llama_server_url} (loopback only)"
+            elif settings.local_backend == "ollama":
+                runtime=f"Ollama at {settings.ollama_url} (loopback only)"
+            elif settings.local_backend == "vllm":
+                runtime=f"vLLM at {settings.vllm_url} (loopback only)"
             else:
                 runtime=f"llama.cpp CLI: {settings.llama_cli}"
             print(f"Local backend: {settings.local_backend}\nRuntime: {runtime}\nLocal model: {p or 'not configured'}\nModel file present: {bool(p and p.is_file())}\nRemote provider: {settings.remote_provider}\nRemote mode configured: {bool(settings.api_key and settings.model)}\nRemote calls are never used in local mode."); return 0
+        if args.models_command == "benchmark":
+            try:
+                provider=build_local_provider(settings)
+                provider.validate()
+                report=benchmark_chat_runtime(provider,runs=args.runs,warmup=args.warmup)
+                report["preflight"]="passed"
+                print(json.dumps(report,ensure_ascii=False,indent=2))
+                return 0
+            except (ProviderError,ValueError,RuntimeError) as exc:
+                print(f"Local runtime benchmark failed: {exc}",file=sys.stderr)
+                return 1
         try:
             provider=build_local_provider(settings)
             if isinstance(provider,LlamaServerProvider):
                 model_id=provider.validate()
                 runtime=provider.last_runtime_info
                 detail=f"Local llama-server is ready; model `{model_id}`, build {runtime.get('build_info', 'not reported')}, effective context {runtime.get('context_size', 'unknown')} tokens, and loaded model path matches AYU_LOCAL_MODEL."
+            elif isinstance(provider,OllamaProvider):
+                model_id=provider.validate()
+                runtime=provider.last_runtime_info
+                detail=f"Local Ollama is reachable; installed model `{model_id}`, digest {runtime.get('digest', 'not reported')}. This preflight does not load or generate with the model."
+            elif isinstance(provider,VLLMProvider):
+                model_id=provider.validate()
+                detail=f"Local vLLM is reachable; served model `{model_id}`. This preflight does not run generation."
             else:
                 model,exe=provider.validate()
                 detail=f"GGUF file and executable preflight passed: {model} ({model.stat().st_size:,} bytes); runtime {exe}."
             if args.infer:
                 answer=provider.complete([{"role":"system","content":"This is a local inference smoke test. Respond briefly."},{"role":"user","content":"Return the text AYU_LOCAL_INFERENCE_OK."}])
-                selected=(f"llama-server model {provider.last_runtime_info.get('model_id')} build {provider.last_runtime_info.get('build_info')}" if isinstance(provider,LlamaServerProvider) else f"llama-cli runtime {exe}")
+                selected=(f"llama-server model {provider.last_runtime_info.get('model_id')} build {provider.last_runtime_info.get('build_info')}" if isinstance(provider,LlamaServerProvider) else f"Ollama model {provider.last_runtime_info.get('model_id')}" if isinstance(provider,OllamaProvider) else f"vLLM model {provider.last_runtime_info.get('model_id')}" if isinstance(provider,VLLMProvider) else f"llama-cli runtime {exe}")
                 print(f"Local inference request succeeded; a non-empty response was received from {selected}.\n{answer}")
             else:
                 print(f"Preflight passed; this did not run model generation. {detail}\nRun `ayu models verify --infer` to test actual inference.")
@@ -646,7 +676,7 @@ def main(argv: list[str] | None = None) -> int:
         print(label+"." if ok else "Task not found."); return 0 if ok else 1
     if cmd == "config":
         if args.config_command=="show":
-            print(f"AYU_MODE={settings.mode}\nAYU_MEMORY_ENABLED={str(settings.memory_enabled).lower()}\nAYU_DATABASE={settings.database_path}\nAYU_LOCAL_BACKEND={settings.local_backend}\nAYU_LOCAL_MODEL={settings.local_model_path or ''}\nAYU_LOCAL_MODEL_ID={settings.local_model_id or ''}\nAYU_LLAMA_CLI={settings.llama_cli}\nAYU_LLAMA_SERVER_URL={settings.llama_server_url}\nAYU_LOCAL_MAX_INPUT_CHARS={settings.local_max_input_chars}\nAYU_PROVIDER={settings.remote_provider}\nAYU_BASE_URL={settings.base_url}\nAYU_MODEL={settings.model or ''}\nSelected AI credential={'<redacted: set>' if settings.api_key else '<not set>'}\nNEWSAPI_API_KEY={'<redacted: set>' if settings.newsapi_api_key else '<not set>'}\nAYU_NEWSAPI_ENABLED={str(settings.newsapi_enabled).lower()}"); return 0
+            print(f"AYU_MODE={settings.mode}\nAYU_MEMORY_ENABLED={str(settings.memory_enabled).lower()}\nAYU_DATABASE={settings.database_path}\nAYU_LOCAL_BACKEND={settings.local_backend}\nAYU_LOCAL_MODEL={settings.local_model_path or ''}\nAYU_LOCAL_MODEL_ID={settings.local_model_id or ''}\nAYU_LLAMA_CLI={settings.llama_cli}\nAYU_LLAMA_SERVER_URL={settings.llama_server_url}\nAYU_OLLAMA_URL={settings.ollama_url}\nAYU_VLLM_URL={settings.vllm_url}\nAYU_LOCAL_MAX_INPUT_CHARS={settings.local_max_input_chars}\nAYU_PROVIDER={settings.remote_provider}\nAYU_BASE_URL={settings.base_url}\nAYU_MODEL={settings.model or ''}\nSelected AI credential={'<redacted: set>' if settings.api_key else '<not set>'}\nNEWSAPI_API_KEY={'<redacted: set>' if settings.newsapi_api_key else '<not set>'}\nAYU_NEWSAPI_ENABLED={str(settings.newsapi_enabled).lower()}"); return 0
         if settings.mode=="remote":
             problems=[]
             key_name={"openai":"OPENAI_API_KEY","anthropic":"ANTHROPIC_API_KEY"}.get(settings.remote_provider,"AYU_API_KEY")

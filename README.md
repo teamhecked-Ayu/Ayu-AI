@@ -5,7 +5,7 @@ Ayu AI is a terminal-first, local-first software foundation. It is useful withou
 ## Operating modes and optional services
 
 - **Basic:** local CLI, SQLite conversation/memory/project/task records, configuration checks, and bounded lexical text search. It does not pretend to provide LLM reasoning.
-- **Local inference:** an explicitly selected, already-installed llama.cpp runtime and a user-supplied compatible GGUF. The preferred `llama-server` backend preserves chat roles for the model's template and checks the server's actual token/context budget; the `llama-cli` adapter remains for backward compatibility. Ayu does not download weights or contact an AI provider in local mode.
+- **Local inference:** an explicitly selected, already-installed llama.cpp, Ollama, or vLLM runtime. The `llama-server` backend verifies the loaded GGUF path and effective token/context budget; `llama-cli` remains for backward compatibility; Ollama uses its native local chat API and exact installed model-name selection. Ayu does not pull/download weights or contact an AI provider in local mode.
 - **Remote inference:** explicitly selected OpenAI, Anthropic, or OpenAI-compatible adapter. Remote calls require credentials/model configuration and an explicit remote chat/agent command (or `AYU_MODE=remote`); there is no fallback between providers.
 - **NewsAPI:** optional article-metadata search, independent from AI inference. It is disabled unless `AYU_NEWSAPI_ENABLED=true`, a NewsAPI key is configured, and the command includes `--allow-network`. Results are untrusted external metadata and are not automatically sent to an AI provider.
 - **AyuLM research:** native byte-level training, held-out validation, checkpoint/resume, evaluation, generation, and local throughput benchmark. PyTorch is optional. A model trained from scratch on a tiny corpus is not a conversational assistant.
@@ -96,6 +96,10 @@ AYU_LOCAL_BACKEND=llama-server
 AYU_LLAMA_SERVER_URL=http://127.0.0.1:9931
 # Optional when the local server serves multiple model IDs.
 # AYU_LOCAL_MODEL_ID=exact-id-from-v1-models
+# Ollama backend: install Ollama and the model separately; Ayu never runs a model pull.
+# AYU_LOCAL_BACKEND=ollama
+# AYU_OLLAMA_URL=http://127.0.0.1:11434
+# AYU_LOCAL_MODEL_ID=exact-installed-model-name
 # Legacy backend only: AYU_LOCAL_BACKEND=llama-cli
 # AYU_LLAMA_CLI=llama-cli
 # AYU_LOCAL_MAX_INPUT_CHARS=65536
@@ -104,6 +108,32 @@ AYU_LLAMA_SERVER_URL=http://127.0.0.1:9931
 ```
 
 Set `AYU_MEMORY_ENABLED=false` to disable persistent-memory retrieval/writes in chat. Existing memories remain on disk, and conversation history is still persisted. Do not save credentials or other secrets as memories; saved user context may be sent to the explicitly selected inference provider.
+
+## Local Ollama inference
+
+Ayu can use an already-installed local Ollama service without an API key. Install
+Ollama and obtain a model separately using Ollama's own documented workflow.
+Then select the backend explicitly:
+
+```sh
+export AYU_MODE=local
+export AYU_LOCAL_BACKEND=ollama
+export AYU_OLLAMA_URL=http://127.0.0.1:11434
+export AYU_LOCAL_MODEL_ID='qwen2.5:7b'  # exact installed name from `ollama list`
+ayu config validate
+ayu models verify
+ayu models verify --infer
+ayu chat --mode local --once "Explain the difference between RAM and storage."
+```
+
+The adapter only accepts a numeric loopback address, verifies the exact model
+name against the local `/api/tags` list, bounds request/response sizes, enforces
+the configured local timeout, and supports Ollama's schema-constrained
+`format` field and NDJSON streaming. It never calls Ollama's model-pull API.
+When multiple models are installed, `AYU_LOCAL_MODEL_ID` must identify exactly
+one. Model-list verification does not load the model or prove inference quality;
+`ayu models verify --infer` performs a real local generation. Ollama runs with
+the current user's privileges and is not an OS sandbox.
 
 ## Local GGUF inference
 
@@ -154,6 +184,43 @@ ayu chat --mode local --once "Explain what a context window is in one sentence."
 
 PowerShell can set the same variables with `$env:AYU_MODE = "local"`, `$env:AYU_LOCAL_BACKEND = "llama-server"`, `$env:AYU_LOCAL_MODEL = "C:\models\model.gguf"`, and `$env:AYU_LLAMA_SERVER_URL = "http://127.0.0.1:9931"`. For a standalone `llama-cli` workflow, set `AYU_LOCAL_BACKEND=llama-cli` and `AYU_LLAMA_CLI` to the installed executable; the stronger context-aware chat check is specific to `llama-server`.
 
+## Local vLLM inference
+
+Ayu can connect to an already-running local vLLM OpenAI-compatible server. Start
+vLLM separately using its official installation and model-serving instructions,
+bind the API to loopback, and configure the exact model ID reported by
+`/v1/models`:
+
+```sh
+export AYU_MODE=local
+export AYU_LOCAL_BACKEND=vllm
+export AYU_VLLM_URL=http://127.0.0.1:8000
+export AYU_LOCAL_MODEL_ID='Qwen/Qwen2.5-7B-Instruct'
+ayu config validate
+ayu models verify
+ayu models verify --infer
+ayu models benchmark --runs 3 --warmup 1
+```
+
+The adapter requires a numeric loopback URL, verifies an exact served model ID,
+bounds request/response sizes, applies the configured timeout, and supports
+SSE streaming plus JSON-Schema response-format requests. Structured decoding
+depends on the installed vLLM version and server configuration. Ayu does not
+download model weights, expose remote fallback, or sandbox the vLLM process.
+The `verify` command checks availability and model identity; `--infer` tests
+generation.
+
+### Local runtime latency benchmark
+
+`ayu models benchmark` runs a fixed synthetic prompt against the selected local
+backend, performs one warm-up by default, and reports per-request plus
+minimum/median/maximum end-to-end latency as JSON. Use `--runs 1..10` and
+`--warmup 0..2` to control the small bounded workload. The report does not
+include prompts or generated text. It deliberately does not claim tokens/second
+because current adapters do not expose comparable token-usage measurements.
+Latency is not a measure of answer quality; compare models only under the same
+hardware, server, quantization, context, and load conditions.
+
 ## Optional OpenAI, Anthropic, and NewsAPI
 
 Choose **one** remote inference provider. The adapters use separate credential environment variables; keys are never shared between providers. Remote HTTP is rejected, error bodies are suppressed, and normal tests use mocks rather than paid/live calls.
@@ -191,6 +258,21 @@ ayu news search "climate policy" --from-date 2026-01-01 --sort-by relevancy --li
 ```
 
 The NewsAPI key is sent only to the fixed NewsAPI HTTPS endpoint in its API-key header. Article descriptions/URLs remain untrusted; verify them at the cited source. Respect the service's terms and rate limits. No live API call was made during development.
+
+## Local vLLM inference
+
+Ayu can connect to a separately started local vLLM OpenAI-compatible server without an API key. Bind the server to loopback (for example, `127.0.0.1`) and configure:
+
+```sh
+export AYU_MODE=local
+export AYU_LOCAL_BACKEND=vllm
+export AYU_VLLM_URL=http://127.0.0.1:8000
+export AYU_LOCAL_MODEL_ID='Qwen/Qwen2.5-7B-Instruct'  # exact ID from /v1/models
+ayu models verify
+ayu models verify --infer  # sends a real local generation request
+```
+
+Ayu accepts only numeric loopback addresses, checks the exact served model ID, bounds request/response sizes, enforces timeouts, and never downloads weights or falls back to a remote provider. Streaming uses server-sent events. Structured coding output uses the OpenAI-compatible JSON Schema response format; support depends on the installed vLLM version and guided-decoding configuration. Mocked adapter tests do not prove a live server, GPU availability, model quality, or schema-decoding compatibility.
 
 ## Bounded read-only agent workflow
 
