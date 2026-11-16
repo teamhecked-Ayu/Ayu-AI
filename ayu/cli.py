@@ -24,7 +24,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
     init = sub.add_parser("init", help="Initialize local configuration without creating credentials")
     init.add_argument("--force", action="store_true", help="Replace existing .env configuration")
-    sub.add_parser("doctor", help="Check local setup without making network requests")
+    doctor = sub.add_parser("doctor", help="Check local setup without making network requests")
+    doctor.add_argument("--json", action="store_true", help="Print a privacy-safe, machine-readable platform diagnostics report")
     sub.add_parser("status", help="Show privacy-safe status and local database counts")
     chat = sub.add_parser("chat", help="Chat using an explicitly selected local or remote model")
     chat.add_argument("--mode", choices=("local", "remote", "basic"), help="Inference mode (default AYU_MODE or local); remote is never selected automatically")
@@ -509,6 +510,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"run_id": args.run_id, "cleanup": outcomes}, ensure_ascii=False, indent=2))
         return 0 if all(item["removed_or_absent"] for item in outcomes) else 1
     if cmd == "doctor":
+        if args.json:
+            from .diagnostics import collect_platform_diagnostics
+            report = collect_platform_diagnostics(settings)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return 1 if report["status"] == "fail" else 0
         parent = settings.database_path.parent
         remote_selected=settings.mode=="remote"
         endpoint_ok = settings.remote_provider == "anthropic" or remote_endpoint_error(settings.base_url) is None
